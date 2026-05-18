@@ -1,4 +1,4 @@
-# MARL Implementation of Slime Volleyball
+# Implementacja MARL dla Slime Volleyball
 
 [Slime Volleyball Gym Environment](https://github.com/hardmaru/slimevolleygym)  
 Typ tematu: 2 lub 3 w zależności od algorytmu uczenia  
