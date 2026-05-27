@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slimevolleygym"
+version = "0.1.0"
+description = "Slime Volleyball Gymnasium Environment"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["gymnasium", "reinforcement-learning", "game", "multi-agent"]
+dependencies = [
+    "gymnasium>=0.29",
+    "numpy>=1.21",
+    "opencv-python>=4.5",
+    "pygame>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Source = "https://github.com/hardmaru/slimevolleygym"
+
+# pyproject.toml lives inside slimevolleygym/ alongside the source files.
+# Explicitly map each module to its wheel destination so hatchling puts
+# them under slimevolleygym/ in site-packages instead of at the top level.
+[tool.hatch.build.targets.wheel.force-include]
+"__init__.py"   = "slimevolleygym/__init__.py"
+"mlp.py"        = "slimevolleygym/mlp.py"
+"slimevolley.py" = "slimevolleygym/slimevolley.py"

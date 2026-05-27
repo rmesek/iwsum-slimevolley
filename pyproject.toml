@@ -1,10 +1,10 @@
 [project]
 name = "iwsum-slimevolley"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.9"
 dependencies = [
-    "agilerl>=2.7.0",
-    "opencv-python>=4.13.0.92",
-    "shimmy>=2.0.1",
-    "slimevolleygym>=0.1.0",
+    "slimevolleygym",
 ]
+
+[tool.uv.sources]
+slimevolleygym = { path = "./slimevolleygym" }
