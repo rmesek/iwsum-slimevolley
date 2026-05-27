@@ -833,7 +833,7 @@ class SlimeVolleyEnv(gymnasium.Env):
         if isinstance(n, (list, tuple, np.ndarray)):
             if len(n) == 3:
                 return n
-        n = int(n)
+        n = int(n)  # type: ignore[arg-type]  – narrowed by isinstance above
         assert 0 <= n < 6, f"Discrete action must be in [0, 5], got {n}"
         return self.action_table[n]
 
@@ -847,7 +847,10 @@ class SlimeVolleyEnv(gymnasium.Env):
         self.ale = self.game.agent_right  # refresh after game.reset() creates new Agent
         self.policy.reset()
         obs = self.getObs()
-        return obs, {}
+        info = {
+            "otherObs": self.game.agent_left.getObservation(),
+        }
+        return obs, info
 
     def step(self, action, otherAction=None):
         """
