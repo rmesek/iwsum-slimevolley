@@ -13,8 +13,7 @@ keywords = ["gymnasium", "reinforcement-learning", "game", "multi-agent"]
 dependencies = [
     "gymnasium>=1.0",
     "numpy>=1.24",
-    "opencv-python-headless>=4.5",
-    "pygame>=2.1",
+    "opencv-python>=4.13.0.92",
 ]
 
 [project.optional-dependencies]

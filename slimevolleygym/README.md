@@ -78,7 +78,7 @@ print("score:", total_reward)
 ## Running the visualisation
 
 Pass `render_mode="human"` when creating the environment.
-A **pygame** window (1200 × 500) opens automatically on the first `env.render()` call.
+A window (1200 × 500) opens automatically on the first `env.render()` call.
 
 ```python
 import gymnasium

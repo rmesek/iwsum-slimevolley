@@ -9,7 +9,7 @@ Original:
   https://blog.otoro.net/2015/03/28/neural-slime-volleyball/
   https://github.com/hardmaru/neuralslimevolley
 
-Dependencies: gymnasium, numpy, opencv-python, pygame (human rendering only)
+Dependencies: gymnasium, numpy, opencv-python
 """
 
 import math
@@ -142,7 +142,7 @@ class DelayScreen:
 
 # ──────────────────────────── Drawing helpers (cv2/numpy) ───────────────────
 # All rendering goes through cv2 into an RGB numpy array.
-# Colors throughout are (R, G, B) tuples; pygame and the obs space both use RGB.
+# Colors throughout are (R, G, B) tuples; The obs space both use RGB.
 
 
 def create_canvas(canvas, c):
@@ -817,9 +817,8 @@ class SlimeVolleyEnv(gymnasium.Env):
         self.policy = BaselinePolicy()
         self.otherAction = None  # can be set externally to override left agent
 
-        # Pygame window (lazy-initialised on first human render)
+        # Window (lazy-initialised on first human render)
         self._window = None
-        self._clock = None
 
     # ── Observation helpers ──────────────────────────────────────────────────
     def getObs(self):
@@ -905,54 +904,49 @@ class SlimeVolleyEnv(gymnasium.Env):
 
         return obs, reward, terminated, truncated, info
 
-    # ── Rendering ────────────────────────────────────────────────────────────
+    # ── Rendering (OpenCV Only) ──────────────────────────────────────────────
     def render(self):
         """Render the current frame.
 
         Returns an RGB numpy array when ``render_mode='rgb_array'``, otherwise
-        None (the frame is shown in a pygame window).
+        displays the frame using cv2.imshow.
         """
         if self.render_mode is None:
             return
 
-        canvas = self.game.display(None)  # (WINDOW_HEIGHT, WINDOW_WIDTH, 3) RGB array
+        # canvas is generated as (H, W, 3) RGB
+        canvas = self.game.display(None)
 
         if self.render_mode == "rgb_array":
             if self.from_pixels:
                 return downsize_image(canvas)
             return canvas.copy()
 
-        # ── human mode: display via pygame ──────────────────────────────────
-        import pygame  # optional dependency; only imported when rendering
+        # ── human mode: display via cv2 ─────────────────────────────────────
+        if self.render_mode == "human":
+            # Convert RGB (from internal rendering) to BGR (for OpenCV display)
+            bgr_canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
 
-        if self._window is None:
-            pygame.init()
-            pygame.display.init()
-            h, w = canvas.shape[:2]
-            self._window = pygame.display.set_mode((w, h))
-            pygame.display.set_caption("Slime Volleyball")
-            self._clock = pygame.time.Clock()
+            if self._window is None:
+                cv2.namedWindow("Slime Volleyball")
+                self._window = True  # Flag to track that the window is open
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+            cv2.imshow("Slime Volleyball", bgr_canvas)
+
+            # Calculate delay in milliseconds to match the target FPS
+            delay = int(1000 / self.metadata["render_fps"])
+
+            # Wait for 'delay' ms. If the user presses the 'ESC' key (27), close the window.
+            key = cv2.waitKey(delay) & 0xFF
+            if key == 27:
                 self.close()
-                return
-
-        # numpy array is (H, W, 3) RGB; pygame surfarray wants (W, H, 3)
-        surf = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
-        self._window.blit(surf, (0, 0))
-        pygame.display.flip()
-        if self._clock is not None:
-            self._clock.tick(self.metadata["render_fps"])
 
     def close(self):
+        """Close the display window."""
         if self._window is not None:
-            import pygame
-
-            pygame.display.quit()
-            pygame.quit()
+            cv2.destroyWindow("Slime Volleyball")
+            # Or use cv2.destroyAllWindows() if you prefer
             self._window = None
-            self._clock = None
 
     def get_action_meanings(self):
         return [self.atari_action_meaning[i] for i in self.atari_action_set]
