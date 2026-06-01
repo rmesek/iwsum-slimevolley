@@ -1,191 +1,151 @@
-"""
-train_shaped.py — reward-shaped CEM training on SlimeVolley-v0.
+# https://docs.agilerl.com/en/latest/on_policy/index.html
 
-Reward modifications over the sparse ±1/life signal:
-  +BALL_TOUCH  when the right agent touches the ball
-               (dense positioning signal; bounce detected *before* game.step()
-                because game.step() moves the ball away after the bounce)
-  -SHAKE       when the agent reverses its lateral direction in consecutive steps
-               (discourages the aimless left-right oscillation untrained agents settle into)
+from pathlib import Path
 
-Algorithm: Cross-Entropy Method (numpy-only, no ML framework).
-With shaped rewards the agent starts developing useful behaviour in ~20 iterations
-(~400 episodes, < 30 seconds).
+import torch
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.training.train_on_policy import train_on_policy
+from agilerl.utils.utils import create_population, make_vect_envs
 
-Usage:
-    uv run src/train_shaped.py                 # 20 iters × 20 pop
-    uv run src/train_shaped.py --iters 40      # more training
-    uv run src/train_shaped.py --no-vis
-"""
-
-from __future__ import annotations
-
-import argparse
-
-import gymnasium
-import numpy as np
-from tqdm import trange
-
-from slimevolleygym import BaselinePolicy, SlimeVolleyEnv
-
-# ── Reward constants ──────────────────────────────────────────────────────────
-BALL_TOUCH_BONUS = 0.2  # agent touches ball
-SHAKE_PENALTY = 0.05  # lateral direction reversal
-
-# ── Policy architecture ───────────────────────────────────────────────────────
-LAYER_SIZES = [12, 32, 3]  # obs → hidden → MultiBinary(3) actions
-
-# ── CEM hyperparameters ───────────────────────────────────────────────────────
-ITERS = 20
-POP_SIZE = 20
-ELITE_FRAC = 0.25
+import shaped_slimevolleygym  # noqa: F401
 
 
-# ── Reward-shaping wrapper ────────────────────────────────────────────────────
-class ShapedSlimeEnv(gymnasium.Wrapper):
-    """Wraps SlimeVolleyEnv with ball-touch bonus and anti-shake penalty.
+def train_agent():
+    # Set up paths
+    base_dir = Path(__file__).parent
+    ckpt_dir = base_dir / "checkpoints"
+    ckpt_dir.mkdir(exist_ok=True)
 
-    Must directly wrap a SlimeVolleyEnv instance so that self.env.game is
-    accessible for reading ball/agent state between physics steps.
-    """
+    save_path = str(ckpt_dir / "ppo_slimevolley_shaped_elite.pt")
+    checkpoint_base_path = str(ckpt_dir / "ppo_slimevolley_shaped")
 
-    def reset(self, **kwargs):
-        self._prev_x = 0  # last non-zero lateral direction: +1 fwd / -1 bwd
-        return self.env.reset(**kwargs)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def step(self, action, otherAction=None):
-        # ── Ball touch bonus ─────────────────────────────────────────────────
-        # Check BEFORE game.step(): bounce() moves the ball away, so
-        # isColliding() is False by the time we return from env.step().
-        ball_touched = self.env.game.ball.isColliding(self.env.game.agent_right)
+    # Define the network configuration
+    NET_CONFIG = {"head_config": {"hidden_size": [64, 64]}}
 
-        obs, reward, terminated, truncated, info = self.env.step(action, otherAction)
+    # Define initial hyperparameters mapped to the SB3 PPO1 baseline
+    POP_SIZE = 1  # Change this to >1 to seamlessly enable evolution
 
-        if ball_touched:
-            reward += BALL_TOUCH_BONUS
+    # Define initial hyperparameters mapped to the SB3 PPO1 baseline
+    INIT_HP = {
+        "POP_SIZE": POP_SIZE,
+        "BATCH_SIZE": 64,
+        "LR": 3e-4,
+        "LEARN_STEP": 512,
+        "GAMMA": 0.99,
+        "GAE_LAMBDA": 0.95,
+        "ACTION_STD_INIT": 0.6,
+        "CLIP_COEF": 0.2,
+        "ENT_COEF": 0.0,
+        "VF_COEF": 0.5,
+        "MAX_GRAD_NORM": 0.5,
+        "TARGET_KL": None,
+        "UPDATE_EPOCHS": 10,
+        "MAX_STEPS": 3_000_000,
+        "EVO_STEPS": 10_000,
+        "EVAL_STEPS": None,
+        "EVAL_LOOP": 5,
+        "TOURN_SIZE": 2,
+        "ELITISM": True,
+    }
 
-        # ── Oscillation / shake penalty ──────────────────────────────────────
-        a = np.asarray(action)
-        cur_x = int(a[0] > 0) - int(a[1] > 0)  # +1 fwd, -1 bwd, 0 still
+    # Define mutation parameters
+    MUT_P = {
+        "NO_MUT": 1.0,
+        "ARCH_MUT": 0.0,
+        "NEW_LAYER": 0.0,
+        "PARAMS_MUT": 0.0,
+        "ACT_MUT": 0.0,
+        "RL_HP_MUT": 0.0,
+        "MUT_SD": 0.0,
+        "RAND_SEED": 1,
+    }
 
-        if self._prev_x != 0 and cur_x != 0 and cur_x != self._prev_x:
-            reward -= SHAKE_PENALTY  # direction reversed
+    if INIT_HP["POP_SIZE"] > 1:
+        MUT_P["NO_MUT"] = 0.4
+        MUT_P["ARCH_MUT"] = 0.2
+        MUT_P["NEW_LAYER"] = 0.2
+        MUT_P["PARAMS_MUT"] = 0.2
+        MUT_P["ACT_MUT"] = 0.0
+        MUT_P["RL_HP_MUT"] = 0.2
+        MUT_P["MUT_SD"] = 0.1
 
-        if cur_x != 0:
-            self._prev_x = cur_x
+    # Create the Environment using the custom shaped ID
+    num_envs = 8
+    env_id = "SlimeVolleyShaped-v0"
 
-        return obs, reward, terminated, truncated, info
+    env = make_vect_envs(env_id, num_envs=num_envs)
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
 
-
-# ── Numpy MLP policy ──────────────────────────────────────────────────────────
-def n_params(sizes: list[int]) -> int:
-    return sum(sizes[i] * sizes[i + 1] + sizes[i + 1] for i in range(len(sizes) - 1))
-
-
-def forward(params: np.ndarray, obs: np.ndarray) -> list[int]:
-    x, ptr = obs.astype(np.float32), 0
-    for i in range(len(LAYER_SIZES) - 1):
-        r, c = LAYER_SIZES[i], LAYER_SIZES[i + 1]
-        W = params[ptr : ptr + r * c].reshape(r, c)
-        ptr += r * c
-        b = params[ptr : ptr + c]
-        ptr += c
-        x = np.tanh(x @ W + b)
-    return (x > 0).astype(int).tolist()
-
-
-# ── Evaluation (shaped env, baseline opponent) ────────────────────────────────
-def evaluate(params: np.ndarray, n_episodes: int = 2) -> float:
-    env = ShapedSlimeEnv(SlimeVolleyEnv())
-    baseline = BaselinePolicy()
-    total = 0.0
-    for seed in range(n_episodes):
-        obs, info = env.reset(seed=seed)
-        obs_left = info["otherObs"]
-        baseline.reset()
-        done = False
-        while not done:
-            obs, r, term, trunc, info = env.step(
-                forward(params, obs), baseline.predict(obs_left)
-            )
-            obs_left = info["otherObs"]
-            total += r
-            done = term or trunc
-    env.close()
-    return total / n_episodes
-
-
-# ── CEM training ──────────────────────────────────────────────────────────────
-def train(n_iters: int, pop: int) -> np.ndarray:
-    dim = n_params(LAYER_SIZES)
-    n_elite = max(2, int(pop * ELITE_FRAC))
-    mu = np.zeros(dim)
-    sigma = np.ones(dim) * 0.5
-
-    print(f"CEM + shaped rewards  |  iters={n_iters}  pop={pop}  params={dim}\n")
-    print(
-        f"  shaped reward = game_reward"
-        f"  +{BALL_TOUCH_BONUS} (ball touch)"
-        f"  -{SHAKE_PENALTY} (direction reversal)\n"
+    # Define hyperparameter search spaces for mutations
+    hp_config = HyperparameterConfig(
+        lr=RLParameter(min=1e-4, max=1e-3),  # type: ignore
+        batch_size=RLParameter(min=64, max=512),  # type: ignore
+        learn_step=RLParameter(min=256, max=1024),  # type: ignore
     )
 
-    pbar = trange(n_iters, unit="iter")
-    for _ in pbar:
-        population = mu + sigma * np.random.randn(pop, dim)
-        scores = [evaluate(p) for p in population]
-        elite = population[np.argsort(scores)[-n_elite:]]
-        mu, sigma = elite.mean(0), elite.std(0) + 1e-5
-        pbar.set_postfix(best=f"{max(scores):+.2f}", mean=f"{np.mean(scores):+.2f}")
+    # Create a Population of Agents
+    pop = create_population(
+        algo="PPO",
+        observation_space=observation_space,
+        action_space=action_space,
+        net_config=NET_CONFIG,
+        INIT_HP=INIT_HP,
+        hp_config=hp_config,
+        population_size=INIT_HP["POP_SIZE"],
+        num_envs=num_envs,
+        device=device,
+    )
 
-    return mu
+    # Create Tournament and Mutation Objects
+    tournament = TournamentSelection(
+        tournament_size=INIT_HP["TOURN_SIZE"],
+        elitism=INIT_HP["ELITISM"],
+        population_size=INIT_HP["POP_SIZE"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+    )
 
+    mutations = Mutations(
+        no_mutation=MUT_P["NO_MUT"],
+        architecture=MUT_P["ARCH_MUT"],
+        new_layer_prob=MUT_P["NEW_LAYER"],
+        parameters=MUT_P["PARAMS_MUT"],
+        activation=MUT_P["ACT_MUT"],
+        rl_hp=MUT_P["RL_HP_MUT"],
+        mutation_sd=MUT_P["MUT_SD"],
+        rand_seed=MUT_P["RAND_SEED"],
+        device=device,
+    )
 
-# ── Visualisation (true game score, no shaping) ───────────────────────────────
-def visualise(params: np.ndarray, n_episodes: int = 3) -> None:
-    """Show the agent with UNMODIFIED game rules so score is directly comparable."""
-    print(f"\nVisualising {n_episodes} episode(s) — true game score (no shaping).\n")
-    env = SlimeVolleyEnv(render_mode="human")
-    baseline = BaselinePolicy()
+    print(f"Starting AgileRL Training on {env_id}...")
 
-    for ep in range(n_episodes):
-        obs, info = env.reset(seed=200 + ep)
-        obs_left = info["otherObs"]
-        baseline.reset()
-        done, score = False, 0.0
-
-        while not done:
-            action = forward(params, obs)
-            obs, r, term, trunc, info = env.step(action, baseline.predict(obs_left))
-            obs_left = info["otherObs"]
-            score += float(r)
-            done = term or trunc
-            env.render()
-
-        result = "win" if score > 0 else ("loss" if score < 0 else "draw")
-        print(f"  episode {ep + 1}: score {score:+.0f}  [{result}]")
+    # Training and Saving an Agent
+    trained_pop, pop_fitnesses = train_on_policy(
+        env=env,
+        env_name=env_id,
+        algo="PPO",
+        pop=pop,  # type: ignore
+        max_steps=INIT_HP["MAX_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        # Built-in checkpointing args:
+        checkpoint=100_000,
+        checkpoint_path=checkpoint_base_path,
+        save_elite=True,
+        elite_path=save_path,
+    )
 
     env.close()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="CEM with shaped rewards on SlimeVolley-v0",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--iters", type=int, default=ITERS)
-    p.add_argument("--pop", type=int, default=POP_SIZE)
-    p.add_argument("--vis-episodes", type=int, default=3)
-    p.add_argument("--no-vis", action="store_true")
-    p.add_argument("--seed", type=int, default=42)
-    args = p.parse_args()
-
-    np.random.seed(args.seed)
-    best = train(args.iters, args.pop)
-
-    if not args.no_vis:
-        visualise(best, args.vis_episodes)
+    print("Training complete!")
 
 
 if __name__ == "__main__":
-    main()
+    train_agent()

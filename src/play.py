@@ -5,6 +5,7 @@ from typing import Any, cast
 import gymnasium as gym
 import pygame
 
+import shaped_slimevolleygym  # noqa: F401
 import slimevolleygym  # noqa: F401
 
 
@@ -51,27 +52,27 @@ def main():
     parser = argparse.ArgumentParser(description="Slime Volleyball Player")
     parser.add_argument(
         "--mode",
-        choices=["human_vs_baseline", "human_vs_elite", "elite_vs_baseline"],
+        choices=["baseline_vs_human", "elite_vs_human", "baseline_vs_elite"],
         required=True,
     )
     args = parser.parse_args()
 
-    env = gym.make("SlimeVolley-v0", render_mode="human")
+    env = gym.make("SlimeVolleyShaped-v0", render_mode="human")
 
     # Cast unwrapped env to Any so the type checker ignores custom attributes
     unwrapped_env = cast(Any, env.unwrapped)
 
     base_dir = Path(__file__).parent
-    elite_path = base_dir / "checkpoints" / "ppo_slimevolley_elite.pt"
+    elite_path = base_dir / "checkpoints" / "ppo_slimevolley_shaped_elite.pt"
 
     # Pre-declare variables to satisfy the type checker
     policy_right: Any = None
     policy_left: Any = None
 
-    if args.mode == "human_vs_baseline":
+    if args.mode == "baseline_vs_human":
         policy_right = HumanPolicy()
         policy_left = unwrapped_env.policy
-    elif args.mode == "human_vs_elite":
+    elif args.mode == "elite_vs_human":
         policy_right = HumanPolicy()
         policy_left = AgileRLPolicy(elite_path)
     else:
