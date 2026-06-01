@@ -9,15 +9,15 @@ Original:
   https://blog.otoro.net/2015/03/28/neural-slime-volleyball/
   https://github.com/hardmaru/neuralslimevolley
 
-Dependencies: gymnasium, numpy, opencv-python
+Dependencies: gymnasium, numpy, pygame
 """
 
 import math
 from collections import deque
 
-import cv2
 import gymnasium
 import numpy as np
+import pygame
 from gymnasium import spaces
 from gymnasium.envs.registration import register
 
@@ -98,15 +98,23 @@ def setPixelObsMode():
 
 
 def upsize_image(img):
-    return cv2.resize(
-        img,
-        (PIXEL_WIDTH * PIXEL_SCALE, PIXEL_HEIGHT * PIXEL_SCALE),
-        interpolation=cv2.INTER_NEAREST,
+    if isinstance(img, np.ndarray):
+        # Convert (H, W, C) -> (W, H, C) for Pygame
+        img = pygame.surfarray.make_surface(np.transpose(img, (1, 0, 2)))
+    scaled = pygame.transform.scale(
+        img, (PIXEL_WIDTH * PIXEL_SCALE, PIXEL_HEIGHT * PIXEL_SCALE)
     )
+    arr = pygame.surfarray.array3d(scaled)
+    # Convert (W, H, C) -> (H, W, C)
+    return np.transpose(arr, (1, 0, 2))
 
 
 def downsize_image(img):
-    return cv2.resize(img, (PIXEL_WIDTH, PIXEL_HEIGHT), interpolation=cv2.INTER_AREA)
+    # img is a Pygame surface
+    scaled = pygame.transform.smoothscale(img, (PIXEL_WIDTH, PIXEL_HEIGHT))
+    arr = pygame.surfarray.array3d(scaled)
+    # Convert (W, H, C) -> (H, W, C)
+    return np.transpose(arr, (1, 0, 2))
 
 
 # ──────────────────────────── Coordinate transforms ─────────────────────────
@@ -140,55 +148,42 @@ class DelayScreen:
         return False
 
 
-# ──────────────────────────── Drawing helpers (cv2/numpy) ───────────────────
-# All rendering goes through cv2 into an RGB numpy array.
-# Colors throughout are (R, G, B) tuples; The obs space both use RGB.
+# ──────────────────────────── Drawing helpers (pygame) ──────────────────────
+# All rendering goes through pygame onto a Surface.
 
 
 def create_canvas(canvas, c):
-    """Return a fresh (WINDOW_HEIGHT, WINDOW_WIDTH, 3) canvas filled with color c."""
-    result = np.empty((WINDOW_HEIGHT, WINDOW_WIDTH, 3), dtype=np.uint8)
-    result[:] = c
-    return result
+    """Return a fresh pygame Surface filled with color c."""
+    surf = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+    surf.fill(c)
+    return surf
 
 
 def rect(canvas, x, y, width, height, color):
-    h = canvas.shape[0]
-    return cv2.rectangle(
-        canvas,
-        (round(x), round(h - y)),
-        (round(x + width), round(h - y + height)),
-        color,
-        thickness=-1,
-        lineType=cv2.LINE_AA,
+    h = canvas.get_height()
+    pygame.draw.rect(
+        canvas, color, (round(x), round(h - y), round(width), round(height))
     )
+    return canvas
 
 
 def half_circle(canvas, x, y, r, color):
-    h = canvas.shape[0]
-    return cv2.ellipse(
+    h = canvas.get_height()
+    pygame.draw.circle(
         canvas,
-        (round(x), h - round(y)),
-        (round(r), round(r)),
-        0,
-        0,
-        -180,
         color,
-        thickness=-1,
-        lineType=cv2.LINE_AA,
+        (round(x), round(h - y)),
+        round(r),
+        draw_top_left=True,
+        draw_top_right=True,
     )
+    return canvas
 
 
 def circle(canvas, x, y, r, color):
-    h = canvas.shape[0]
-    return cv2.circle(
-        canvas,
-        (round(x), round(h - y)),
-        max(1, round(r)),
-        color,
-        thickness=-1,
-        lineType=cv2.LINE_AA,
-    )
+    h = canvas.get_height()
+    pygame.draw.circle(canvas, color, (round(x), round(h - y)), max(1, round(r)))
+    return canvas
 
 
 # ──────────────────────────── Game objects ──────────────────────────────────
@@ -476,8 +471,7 @@ class BaselinePolicy:
         self.outputState = np.zeros(self.nOutput)
         self.prevOutputState = np.zeros(self.nOutput)
 
-        # Weights from the original blog post:
-        # https://blog.otoro.net/2015/03/28/neural-slime-volleyball/
+        # Weights from the original blog post
         self.weight = np.array(
             [
                 7.5719,
@@ -637,7 +631,6 @@ class Game:
 
     def __init__(self, np_random=None):
         self.np_random = np_random if np_random is not None else np.random.default_rng()
-        # Initialise all game objects via reset() so type annotations are satisfied.
         self.reset()
 
     def reset(self):
@@ -704,7 +697,7 @@ class Game:
         return result
 
     def display(self, canvas):
-        """Render the current game state to an RGB numpy array."""
+        """Render the current game state to a pygame Surface."""
         canvas = create_canvas(canvas, c=BACKGROUND_COLOR)
         canvas = self.fence.display(canvas)
         canvas = self.fenceStub.display(canvas)
@@ -724,21 +717,6 @@ class Game:
 class SlimeVolleyEnv(gymnasium.Env):
     """
     Gymnasium environment for Slime Volleyball.
-
-    The **right** agent is the one being trained; the **left** agent defaults
-    to the built-in 120-parameter RNN baseline policy.
-
-    Single-agent usage (standard Gymnasium loop):
-
-        obs, info = env.reset()
-        obs, reward, terminated, truncated, info = env.step(action)
-
-    Multi-agent / self-play usage (pass a second action to step):
-
-        obs, reward, terminated, truncated, info = env.step(action1, action2)
-        obs2 = info['otherObs']   # left agent's observation
-
-    Reward is from the **right** agent's perspective (+1 / -1 per life lost).
     """
 
     metadata = {
@@ -811,14 +789,12 @@ class SlimeVolleyEnv(gymnasium.Env):
             self.observation_space = spaces.Box(-high, high, dtype=np.float32)
 
         self.game = Game()
-        self.ale = (
-            self.game.agent_right
-        )  # compatibility shim for models using ale.lives()
+        self.ale = self.game.agent_right
         self.policy = BaselinePolicy()
-        self.otherAction = None  # can be set externally to override left agent
+        self.otherAction = None
 
-        # Window (lazy-initialised on first human render)
         self._window = None
+        self._clock = None
 
     # ── Observation helpers ──────────────────────────────────────────────────
     def getObs(self):
@@ -832,18 +808,20 @@ class SlimeVolleyEnv(gymnasium.Env):
         if isinstance(n, (list, tuple, np.ndarray)):
             if len(n) == 3:
                 return n
-        n = int(n)  # type: ignore[arg-type]  – narrowed by isinstance above
+            # Prevent fall-through if it's a list but not length 3
+            raise ValueError(f"Action array must have length 3, got {len(n)}")
+
+        n = int(n)
         assert 0 <= n < 6, f"Discrete action must be in [0, 5], got {n}"
         return self.action_table[n]
 
     # ── Gymnasium API ────────────────────────────────────────────────────────
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        # Propagate numpy Generator into game for deterministic resets
         self.game.np_random = self.np_random
         self.t = 0
         self.game.reset()
-        self.ale = self.game.agent_right  # refresh after game.reset() creates new Agent
+        self.ale = self.game.agent_right
         self.policy.reset()
         obs = self.getObs()
         info = {
@@ -852,20 +830,8 @@ class SlimeVolleyEnv(gymnasium.Env):
         return obs, info
 
     def step(self, action, otherAction=None):
-        """
-        Step the environment.
-
-        Args:
-            action:      Action for the right (training) agent.
-            otherAction: Optional action for the left agent.  When ``None``,
-                         the built-in baseline policy is used.
-
-        Returns:
-            ``(obs, reward, terminated, truncated, info)``
-        """
         self.t += 1
 
-        # Resolve left agent action
         if self.otherAction is not None:
             otherAction = self.otherAction
         if otherAction is None:
@@ -885,8 +851,9 @@ class SlimeVolleyEnv(gymnasium.Env):
 
         otherObs = None
         if self.multiagent:
+            # Horizontal flip for pixel obs, else normal state obs
             otherObs = (
-                cv2.flip(obs, 1)
+                obs[:, ::-1, :]
                 if self.from_pixels
                 else self.game.agent_left.getObservation()
             )
@@ -904,49 +871,49 @@ class SlimeVolleyEnv(gymnasium.Env):
 
         return obs, reward, terminated, truncated, info
 
-    # ── Rendering (OpenCV Only) ──────────────────────────────────────────────
+    # ── Rendering (Pygame Only) ──────────────────────────────────────────────
     def render(self):
-        """Render the current frame.
-
-        Returns an RGB numpy array when ``render_mode='rgb_array'``, otherwise
-        displays the frame using cv2.imshow.
-        """
         if self.render_mode is None:
             return
 
-        # canvas is generated as (H, W, 3) RGB
+        # canvas is generated as a pygame Surface
         canvas = self.game.display(None)
 
         if self.render_mode == "rgb_array":
             if self.from_pixels:
                 return downsize_image(canvas)
-            return canvas.copy()
+            # Pygame array3d returns (W, H, C); transpose to (H, W, C)
+            arr = pygame.surfarray.array3d(canvas)
+            return np.transpose(arr, (1, 0, 2))
 
-        # ── human mode: display via cv2 ─────────────────────────────────────
+        # ── human mode: display via pygame ───────────────────────────────────
         if self.render_mode == "human":
-            # Convert RGB (from internal rendering) to BGR (for OpenCV display)
-            bgr_canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-
             if self._window is None:
-                cv2.namedWindow("Slime Volleyball")
-                self._window = True  # Flag to track that the window is open
+                pygame.init()
+                pygame.display.set_caption("Slime Volleyball")
+                self._window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+                self._clock = pygame.time.Clock()
 
-            cv2.imshow("Slime Volleyball", bgr_canvas)
+            self._window.blit(canvas, (0, 0))
+            pygame.display.flip()
 
-            # Calculate delay in milliseconds to match the target FPS
-            delay = int(1000 / self.metadata["render_fps"])
+            # Assure the type checker that _clock was initialized
+            assert self._clock is not None
+            self._clock.tick(self.metadata["render_fps"])
 
-            # Wait for 'delay' ms. If the user presses the 'ESC' key (27), close the window.
-            key = cv2.waitKey(delay) & 0xFF
-            if key == 27:
-                self.close()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.close()
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.close()
 
     def close(self):
         """Close the display window."""
         if self._window is not None:
-            cv2.destroyWindow("Slime Volleyball")
-            # Or use cv2.destroyAllWindows() if you prefer
+            pygame.display.quit()
             self._window = None
+            self._clock = None
 
     def get_action_meanings(self):
         return [self.atari_action_meaning[i] for i in self.atari_action_set]
@@ -1018,15 +985,8 @@ class FrameStack(gymnasium.Wrapper):
 
 # ──────────────────────────── Helper functions ──────────────────────────────
 def multiagent_rollout(env, policy_right, policy_left, render_mode=False):
-    """
-    Run one full episode with two policies.
-
-    Returns:
-        (total_reward, timesteps) where total_reward is from *policy_right*'s
-        perspective (positive = right agent winning).
-    """
     obs_right, info = env.reset()
-    obs_left = obs_right  # both sides share the same initial observation
+    obs_left = obs_right
     done = False
     total_reward = 0
     t = 0
@@ -1052,7 +1012,7 @@ def multiagent_rollout(env, policy_right, policy_left, render_mode=False):
 def render_atari(obs):
     """Visualise a stacked Atari observation of shape (84, 84, 4).
 
-    Returns an RGB image with the latest frame (top) and all 4 frames (bottom).
+    Returns an RGB numpy array with the latest frame (top) and all 4 frames (bottom).
     """
     obs = np.copy(obs)
     frames = []
@@ -1063,11 +1023,13 @@ def render_atari(obs):
 
     latest = np.expand_dims(frames[-1], axis=2)
     latest = np.concatenate([latest * 255.0] * 3, axis=2).astype(np.uint8)
-    latest = cv2.resize(latest, (84 * 8, 84 * 4), interpolation=cv2.INTER_NEAREST)
+    # Using numpy instead of cv2.resize for nearest neighbor scaling (x4 height, x8 width)
+    latest = np.repeat(np.repeat(latest, 4, axis=0), 8, axis=1)
 
     strip = np.expand_dims(np.concatenate(frames, axis=1), axis=2)
     strip = np.concatenate([strip * 255.0] * 3, axis=2).astype(np.uint8)
-    strip = cv2.resize(strip, (84 * 8, 84 * 2), interpolation=cv2.INTER_NEAREST)
+    # Using numpy instead of cv2.resize for nearest neighbor scaling (x2 height, x2 width)
+    strip = np.repeat(np.repeat(strip, 2, axis=0), 2, axis=1)
 
     return np.concatenate([latest, strip], axis=0)
 
