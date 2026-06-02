@@ -10,9 +10,50 @@ from tqdm import tqdm
 import shaped_slimevolleygym  # noqa: F401
 
 
+def evaluate_against_baseline(agent, env_id="SlimeVolleyShaped-v0", num_episodes=10):
+    """
+    Evaluates the IPPO agent's absolute performance against the built-in baseline policy.
+    Self-play scores are relative; this provides a true metric of skill progression.
+    """
+    eval_env = gym.make(env_id)
+    returns = []
+    for _ in range(num_episodes):
+        obs, info = eval_env.reset()
+        done = False
+        episode_return = 0
+        while not done:
+            # Baseline policy controls the left agent
+            eval_env.unwrapped.otherAction = eval_env.unwrapped.policy.predict(
+                info["otherObs"]
+            )
+
+            # IPPO agent controls the right agent
+            obs_expanded = np.expand_dims(obs, axis=0)
+            dict_obs = {"slime_1": obs_expanded}
+
+            # Safely unpack action dictionary whether it's wrapped in a tuple or not
+            action_out = agent.get_action(dict_obs, training=False)
+            dict_actions = (
+                action_out[0] if isinstance(action_out, tuple) else action_out
+            )
+            action = dict_actions["slime_1"][0]
+
+            if isinstance(action, torch.Tensor):
+                action = action.cpu().numpy()
+
+            obs, reward, term, trunc, info = eval_env.step(action)
+            episode_return += reward
+            done = term or trunc
+
+        returns.append(episode_return)
+
+    eval_env.close()
+    return np.mean(returns)
+
+
 def train_multiagent_ippo():
     # Set up paths
-    base_dir = Path(__file__).parent
+    base_dir = Path(__file__).parent.parent
     ckpt_dir = base_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     save_path = str(ckpt_dir / "ippo_slimevolley_shaped_elite.pt")
@@ -20,15 +61,13 @@ def train_multiagent_ippo():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
 
-    # 1. Create a synchronous list of environments
-    # We use a manual list so we can directly inject the left agent's actions into the unwrapped envs.
+    # Create a synchronous list of environments
     envs = [gym.make("SlimeVolleyShaped-v0") for _ in range(num_envs)]
 
     single_obs_space = envs[0].observation_space
     single_act_space = envs[0].action_space
 
-    # 2. IPPO Setup for 2 Homogeneous Agents
-    # The shared prefix "slime_" forces them to share the same actor and critic networks.
+    # IPPO Setup for 2 Homogeneous Agents
     agent_ids = ["slime_0", "slime_1"]
     observation_spaces = [single_obs_space, single_obs_space]
     action_spaces = [single_act_space, single_act_space]
@@ -40,18 +79,17 @@ def train_multiagent_ippo():
         device=device,
         batch_size=256,
         lr=3e-4,
-        learn_step=512,  # 512 steps * 8 envs = 4096 frames per update
+        learn_step=512,
         gamma=0.99,
-        ent_coef=0.01,  # Forces exploration to prevent mode collapse in self-play
+        ent_coef=0.01,
     )
 
     t_agent = cast(Any, agent)
-    max_steps = 20_000_000  # Self-play requires more steps to converge
+    max_steps = 20_000_000
     checkpoint_freq = 250_000
 
     pbar = tqdm(total=max_steps)
 
-    # Pre-allocate arrays
     obs_dim = single_obs_space.shape[0]
     obs_right = np.zeros((num_envs, obs_dim), dtype=np.float32)
     obs_left = np.zeros((num_envs, obs_dim), dtype=np.float32)
@@ -64,11 +102,11 @@ def train_multiagent_ippo():
     scores = np.zeros(num_envs)
     completed_scores = []
     last_checkpoint = 0
+    best_eval_score = -np.inf  # Track best score for elite saving
 
     print("Starting IPPO Self-Play Training...")
 
     while t_agent.steps[-1] < max_steps:
-        # Initialize experience buffers
         states = {a: [] for a in agent_ids}
         actions = {a: [] for a in agent_ids}
         log_probs = {a: [] for a in agent_ids}
@@ -80,13 +118,11 @@ def train_multiagent_ippo():
         steps_added = 0
 
         for _ in range(t_agent.learn_step):
-            # Construct IPPO dictionary observation
             dict_obs = {
-                "slime_0": obs_left,  # Left agent
-                "slime_1": obs_right,  # Right agent
+                "slime_0": obs_left,
+                "slime_1": obs_right,
             }
 
-            # Get actions from IPPO
             action_tuple = agent.get_action(obs=dict_obs, training=True)
 
             dict_actions = cast(Dict[str, np.ndarray], action_tuple[0])
@@ -99,12 +135,8 @@ def train_multiagent_ippo():
             step_rewards_right = np.zeros(num_envs, dtype=np.float32)
             step_terms = np.zeros(num_envs, dtype=bool)
 
-            # Step environments
             for i, env in enumerate(envs):
-                # Inject left agent's action
                 env.unwrapped.otherAction = dict_actions["slime_0"][i]
-
-                # Step right agent
                 o_r, r_r, term, trunc, info = env.step(dict_actions["slime_1"][i])
 
                 step_rewards_right[i] = r_r
@@ -119,13 +151,12 @@ def train_multiagent_ippo():
                 next_obs_right[i] = o_r
                 next_obs_left[i] = info["otherObs"]
 
-            # CRITICAL: Strict zero-sum enforcement for symmetric self-play
+            # Strict zero-sum enforcement for symmetric self-play
             step_rewards_left = -step_rewards_right
 
             dict_rewards = {"slime_0": step_rewards_left, "slime_1": step_rewards_right}
             dict_dones = {"slime_0": step_terms, "slime_1": step_terms}
 
-            # Save to buffers
             for a_id in agent_ids:
                 states[a_id].append(dict_obs[a_id])
                 actions[a_id].append(dict_actions[a_id])
@@ -139,7 +170,6 @@ def train_multiagent_ippo():
             obs_left = next_obs_left
             steps_added += num_envs
 
-        # Structure experiences and update network
         dict_next_obs = {"slime_0": obs_left, "slime_1": obs_right}
         experiences = (
             states,
@@ -155,22 +185,31 @@ def train_multiagent_ippo():
         current_steps = t_agent.steps[-1] + steps_added
         t_agent.steps[-1] = current_steps
 
-        # Update progress bar
         pbar.update(steps_added)
-        if len(completed_scores) > 0:
-            # Self-play scores will naturally hover near 0.0 as they are equally matched
-            pbar.set_description(
-                f"Right Agent Avg Score: {np.mean(completed_scores[-20:]):.2f}"
+
+        # Periodic Checkpointing & Baseline Evaluation
+        if current_steps - last_checkpoint >= checkpoint_freq:
+            eval_score = evaluate_against_baseline(
+                agent, env_id="SlimeVolleyShaped-v0", num_episodes=10
             )
 
-        # Periodic Checkpointing
-        if current_steps - last_checkpoint >= checkpoint_freq:
+            pbar.set_description(
+                f"Eval vs Baseline: {eval_score:.2f} | Self-Play: {np.mean(completed_scores[-20:]):.2f}"
+            )
+
             ckpt_path = str(ckpt_dir / f"ippo_checkpoint_{current_steps}.pt")
             agent.save_checkpoint(ckpt_path)
-            agent.save_checkpoint(save_path)  # Overwrite elite
+
+            # Only overwrite the elite model if it actually improved
+            if eval_score >= best_eval_score:
+                best_eval_score = eval_score
+                agent.save_checkpoint(save_path)
+                tqdm.write(
+                    f"\n[Step {current_steps}] New elite model saved! Eval Score: {eval_score:.2f}"
+                )
+
             last_checkpoint = current_steps
 
-    agent.save_checkpoint(save_path)
     for env in envs:
         env.close()
     print("Training complete!")

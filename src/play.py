@@ -1,5 +1,5 @@
-# uv run src/play.py --mode baseline_vs_elite --model src/checkpoints/ppo_slimevolley_elite.pt
-# uv run src/play.py --mode baseline_vs_elite --model src/checkpoints/ppo_slimevolley_shaped_elite.pt --env SlimeVolleyShaped-v0
+# uv run src/play.py --mode baseline_vs_elite --model checkpoints/ppo_slimevolley_elite.pt
+# uv run src/play.py --mode baseline_vs_elite --model checkpoints/ppo_slimevolley_shaped_elite.pt --env SlimeVolleyShaped-v0
 
 import argparse
 from typing import Any, cast
@@ -70,8 +70,10 @@ class AgileRLIPPOPolicy:
 
         dict_obs = {self.agent_id: obs}
 
-        action_tuple = cast(Any, self.agent.get_action(dict_obs, training=False))
-        action = action_tuple[0][self.agent_id]
+        action_out = cast(Any, self.agent.get_action(dict_obs, training=False))
+        dict_actions = action_out[0] if isinstance(action_out, tuple) else action_out
+
+        action = dict_actions[self.agent_id]
 
         if isinstance(action, torch.Tensor):
             action = action.cpu().numpy()
