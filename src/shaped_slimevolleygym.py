@@ -11,7 +11,7 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
     Custom wrapper class that inherits from SlimeVolleyEnv.
     Fails the rally and penalizes an agent if it juggles/touches
     the ball more than 3 times without it crossing the net.
-    Now includes dense reward shaping (survival + returning over the net).
+    Includes dense reward shaping (potential-based distance + returning over the net).
     """
 
     def __init__(self, **kwargs):
@@ -26,6 +26,7 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         self.was_moving_down: bool = False
         self.touch_cooldown: int = 0
         self.prev_bx: float = 0.0
+        self.prev_dist: float | None = None  # Tracks distance to ball for shaping
 
     def reset(self, **kwargs) -> tuple[np.ndarray, dict[str, Any]]:
         self._reset_touch_state()
@@ -41,6 +42,8 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
         reward = float(base_reward)
 
+        # 0: agent_x, 4: ball_x, 7: ball_vy
+        agent_x = obs[0]
         bx = obs[4]
         bvy = obs[7]
 
@@ -53,7 +56,16 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
             return obs, reward, terminated, truncated, info
 
         # --- DENSE REWARD SHAPING ---
-        reward += 0.01  # Survival bonus
+
+        # Potential-Based Distance Tracking
+        current_dist = abs(agent_x - bx)
+
+        if self.prev_dist is not None:
+            # If we moved closer, delta is positive (Reward). If further, negative (Penalty).
+            delta_dist = self.prev_dist - current_dist
+            reward += delta_dist * 0.2
+
+        self.prev_dist = current_dist
 
         # Net cross reward
         if self.prev_bx > 0 > bx:
