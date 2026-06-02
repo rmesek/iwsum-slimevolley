@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pop-size",
         type=int,
-        default=2,
+        default=6,
         help="Population size for evolution (default: 2).",
     )
     parser.add_argument(
