@@ -13,7 +13,6 @@ class HumanPolicy:
     def predict(self, obs):
         pygame.event.pump()
         keys = pygame.key.get_pressed()
-        # Right agent mappings: K_LEFT moves forward (towards net), K_RIGHT moves back
         return [
             int(keys[pygame.K_LEFT]),
             int(keys[pygame.K_RIGHT]),
@@ -52,7 +51,6 @@ class AgileRLIPPOPolicy:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.agent_id = agent_id
 
-        # IPPO requires the spaces to initialize the architecture before loading weights
         self.agent = IPPO(
             observation_spaces=[obs_space, obs_space],
             action_spaces=[act_space, act_space],
@@ -68,7 +66,6 @@ class AgileRLIPPOPolicy:
         if len(obs.shape) == 1:
             obs = np.expand_dims(obs, axis=0)
 
-        # IPPO expects a dictionary of observations
         dict_obs = {self.agent_id: obs}
 
         action_tuple = cast(Any, self.agent.get_action(dict_obs, training=False))
@@ -96,17 +93,18 @@ def main():
         ],
         required=True,
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        help="Direct path to the .pt model file",
+    )
     args = parser.parse_args()
 
     env = gym.make("SlimeVolleyShaped-v0", render_mode="human")
-
-    # Cast unwrapped env to Any so the type checker ignores custom attributes
     unwrapped_env = cast(Any, env.unwrapped)
+    elite_path = args.model
 
-    base_dir = Path(__file__).parent
-    elite_path = base_dir / "checkpoints" / "ppo_slimevolley_shaped_elite.pt"
-
-    # Pre-declare variables to satisfy the type checker
     policy_right: Any = None
     policy_left: Any = None
 
@@ -132,22 +130,15 @@ def main():
     env.render()
 
     done = False
-
     while not done:
         action_right = policy_right.predict(obs)
         action_left = policy_left.predict(info["otherObs"])
 
-        # Inject the left agent's action
         unwrapped_env.otherAction = action_left
-
-        # Step the environment wrapper with just the right agent's action
         obs, reward, terminated, truncated, info = env.step(action_right)
         done = terminated or truncated
 
         env.render()
-
-        # Check if the environment destroyed the window (User clicked 'X' or pressed 'ESC')
-        # If so, immediately break the loop to prevent crashes or zombie windows.
         if unwrapped_env._window is None:
             break
 
