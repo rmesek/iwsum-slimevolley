@@ -8,6 +8,7 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
     Custom wrapper class that inherits from SlimeVolleyEnv.
     Fails the episode and penalizes an agent if it juggles/touches
     the ball more than 3 times without it crossing the net.
+    Now includes dense reward shaping (survival + returning over the net).
     """
 
     def __init__(self, **kwargs):
@@ -20,15 +21,25 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         # Added a cooldown to prevent "ghost touches" from physics jitter
         self.touch_cooldown = 0
 
+        # Track the ball's previous X position to detect when it crosses the net
+        self.prev_bx = 0
+
     def reset(self, **kwargs):
         self.right_touches = 0
         self.left_touches = 0
         self.was_moving_down = False
         self.touch_cooldown = 0
+        self.prev_bx = 0
         return super().reset(**kwargs)
 
     def step(self, action, otherAction=None):
-        obs, reward, terminated, truncated, info = super().step(action, otherAction)
+        # Capture the raw environment response
+        obs, base_reward, terminated, truncated, info = super().step(
+            action, otherAction
+        )
+
+        # Initialize our shaped reward with the base reward
+        reward = base_reward
 
         # Observation features mapping: 0:x, 1:y, 2:vx, 3:vy, 4:bx, 5:by, 6:bvx, 7:bvy
         bx = obs[4]
@@ -38,13 +49,28 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         if self.touch_cooldown > 0:
             self.touch_cooldown -= 1
 
-        # If a normal point was just scored, reset touch counters for the new serve
-        if reward != 0:
+        # If a normal point was just scored (base_reward != 0), reset touch counters for the new serve
+        # We use base_reward here so our shaped rewards don't trigger a false reset!
+        if base_reward != 0:
             self.right_touches = 0
             self.left_touches = 0
             self.was_moving_down = False
             self.touch_cooldown = 0
+            # Return immediately without applying shaping, as the rally just ended
             return obs, reward, terminated, truncated, info
+
+        # --- DENSE REWARD SHAPING ---
+
+        # 1. SURVIVAL BONUS: Reward the agent slightly for every frame it keeps the ball in play
+        reward += 0.01
+
+        # 2. OVER THE NET REWARD: If the ball was on our side (>0), and is now on the opponent's side (<0)
+        if self.prev_bx > 0 and bx < 0:
+            reward += 0.5  # Significant reward for a successful return
+
+        self.prev_bx = bx  # Update previous position for the next frame
+
+        # ----------------------------
 
         is_moving_down = bvy < 0
 
@@ -61,7 +87,7 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
             if bx > 0:
                 self.right_touches += 1
-                # FIX 1: Only reward the FIRST touch to prevent juggling point-farming
+                # 3. FIRST TOUCH REWARD: Only reward the FIRST touch to prevent juggling point-farming
                 if self.right_touches == 1:
                     reward += 0.1
             elif bx < 0:
@@ -71,11 +97,11 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
         # Enforce the 3-touch rule for the right agent (your model)
         if self.right_touches > self.max_touches:
-            reward = -1.0  # Penalize the agent
+            reward = -1.0  # Penalize the agent heavily
             self.right_touches = 0
             self.left_touches = 0
 
-            # FIX 2: Manually deduct a life and reset the rally instead of killing the episode
+            # Manually deduct a life and reset the rally instead of killing the episode
             self.game.agent_right.life -= 1
             self.game.agent_left.emotion = "happy"
             self.game.agent_right.emotion = "sad"

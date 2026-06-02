@@ -1,3 +1,6 @@
+# uv run src/play.py --mode baseline_vs_elite --model src/checkpoints/ppo_slimevolley_elite.pt
+# uv run src/play.py --mode baseline_vs_elite --model src/checkpoints/ppo_slimevolley_shaped_elite.pt --env SlimeVolleyShaped-v0
+
 import argparse
 from typing import Any, cast
 
@@ -98,9 +101,16 @@ def main():
         required=True,
         help="Direct path to the .pt model file",
     )
+    parser.add_argument(
+        "--env",
+        type=str,
+        default="SlimeVolley-v0",
+        help="The Gym environment ID to play in",
+    )
     args = parser.parse_args()
 
-    env = gym.make("SlimeVolley-v0", render_mode="human")
+    # --- NEW: Use the args.env variable instead of the hardcoded string ---
+    env = gym.make(args.env, render_mode="human")
     unwrapped_env = cast(Any, env.unwrapped)
     elite_path = args.model
 
