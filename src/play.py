@@ -44,6 +44,42 @@ class AgileRLPolicy:
         return action[0]
 
 
+class AgileRLIPPOPolicy:
+    def __init__(self, path, obs_space, act_space, agent_id="slime_1"):
+        import torch
+        from agilerl.algorithms import IPPO
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.agent_id = agent_id
+
+        # IPPO requires the spaces to initialize the architecture before loading weights
+        self.agent = IPPO(
+            observation_spaces=[obs_space, obs_space],
+            action_spaces=[act_space, act_space],
+            agent_ids=["slime_0", "slime_1"],
+            device=self.device,
+        )
+        self.agent.load_checkpoint(path)
+
+    def predict(self, obs):
+        import numpy as np
+        import torch
+
+        if len(obs.shape) == 1:
+            obs = np.expand_dims(obs, axis=0)
+
+        # IPPO expects a dictionary of observations
+        dict_obs = {self.agent_id: obs}
+
+        action_tuple = cast(Any, self.agent.get_action(dict_obs, training=False))
+        action = action_tuple[0][self.agent_id]
+
+        if isinstance(action, torch.Tensor):
+            action = action.cpu().numpy()
+
+        return action[0]
+
+
 def main():
     pygame.init()
     pygame.display.set_mode((1200, 500))
@@ -52,7 +88,12 @@ def main():
     parser = argparse.ArgumentParser(description="Slime Volleyball Player")
     parser.add_argument(
         "--mode",
-        choices=["baseline_vs_human", "elite_vs_human", "baseline_vs_elite"],
+        choices=[
+            "baseline_vs_human",
+            "elite_vs_human",
+            "elite_vs_elite",
+            "baseline_vs_elite",
+        ],
         required=True,
     )
     args = parser.parse_args()
@@ -75,6 +116,14 @@ def main():
     elif args.mode == "elite_vs_human":
         policy_right = HumanPolicy()
         policy_left = AgileRLPolicy(elite_path)
+    elif args.mode == "elite_vs_elite":
+        print("Loading Self-Play Elite Agents...")
+        policy_right = AgileRLIPPOPolicy(
+            elite_path, env.observation_space, env.action_space, agent_id="slime_1"
+        )
+        policy_left = AgileRLIPPOPolicy(
+            elite_path, env.observation_space, env.action_space, agent_id="slime_0"
+        )
     else:
         policy_right = AgileRLPolicy(elite_path)
         policy_left = unwrapped_env.policy

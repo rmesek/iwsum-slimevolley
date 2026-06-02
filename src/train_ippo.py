@@ -1,236 +1,180 @@
-"""
-IPPO self-play on SlimeVolley-v0 (AgileRL).
+from pathlib import Path
+from typing import Any, Dict, cast
 
-Both agents are trained simultaneously with Independent PPO against each
-other (self-play).  The env normalises all observations to the right-agent
-perspective, so the same policy generalises to both sides.
-
-Usage:
-    uv run src/train_ippo.py                     # 10 000 steps, then watch bots play
-    uv run src/train_ippo.py --steps 500000      # ~9 min on CPU, first real learning
-    uv run src/train_ippo.py --steps 500000 --human   # play against the bot afterwards
-    uv run src/train_ippo.py --no-vis            # headless only
-
-Training time guide (single CPU):
-    10 000 steps  →  ~10 s   (smoke test)
-   200 000 steps  →  ~3 min  (first signs of learning)
-   500 000 steps  →  ~9 min  (competent self-play)
- 2 000 000 steps  →  ~35 min (strong agent)
-"""
-
-from __future__ import annotations
-
-import argparse
-
+import gymnasium as gym
 import numpy as np
 import torch
 from agilerl.algorithms import IPPO
 from tqdm import tqdm
 
-from slimevolleygym import SlimeVolleyEnv
-
-# ── Constants ─────────────────────────────────────────────────────────────────
-AGENT_IDS = ["right", "left"]
-LEARN_STEP = 512  # env steps between updates — raise for better learning
-BATCH_SIZE = 64
-LR = 3e-4
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import shaped_slimevolleygym  # noqa: F401
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
-def train(max_steps: int) -> IPPO:
-    env = SlimeVolleyEnv()
+def train_multiagent_ippo():
+    # Set up paths
+    base_dir = Path(__file__).parent
+    ckpt_dir = base_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    save_path = str(ckpt_dir / "ippo_slimevolley_shaped_elite.pt")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_envs = 8
+
+    # 1. Create a synchronous list of environments
+    # We use a manual list so we can directly inject the left agent's actions into the unwrapped envs.
+    envs = [gym.make("SlimeVolleyShaped-v0") for _ in range(num_envs)]
+
+    single_obs_space = envs[0].observation_space
+    single_act_space = envs[0].action_space
+
+    # 2. IPPO Setup for 2 Homogeneous Agents
+    # The shared prefix "slime_" forces them to share the same actor and critic networks.
+    agent_ids = ["slime_0", "slime_1"]
+    observation_spaces = [single_obs_space, single_obs_space]
+    action_spaces = [single_act_space, single_act_space]
 
     agent = IPPO(
-        observation_spaces=[env.observation_space] * 2,
-        action_spaces=[env.action_space] * 2,
-        agent_ids=AGENT_IDS,
-        learn_step=LEARN_STEP,
-        batch_size=BATCH_SIZE,
-        lr=LR,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
+        agent_ids=agent_ids,
+        device=device,
+        batch_size=256,
+        lr=3e-4,
+        learn_step=512,  # 512 steps * 8 envs = 4096 frames per update
         gamma=0.99,
-        gae_lambda=0.95,
-        clip_coef=0.2,
-        ent_coef=0.01,
-        update_epochs=4,
-        device=str(device),
+        ent_coef=0.01,  # Forces exploration to prevent mode collapse in self-play
     )
 
-    # Carry env state across update boundaries — correct GAE bootstrapping.
-    obs_r, info = env.reset()
-    obs = {"right": obs_r, "left": info["otherObs"]}
-    done = {aid: np.zeros(1) for aid in AGENT_IDS}
+    t_agent = cast(Any, agent)
+    max_steps = 20_000_000  # Self-play requires more steps to converge
+    checkpoint_freq = 250_000
 
-    ep_score = 0.0
-    completed_scores: list[float] = []
-    total_steps = 0
-    pbar = tqdm(total=max_steps, unit="step")
+    pbar = tqdm(total=max_steps)
 
-    while total_steps < max_steps:
-        states = {aid: [] for aid in AGENT_IDS}
-        actions = {aid: [] for aid in AGENT_IDS}
-        log_probs = {aid: [] for aid in AGENT_IDS}
-        rewards = {aid: [] for aid in AGENT_IDS}
-        dones = {aid: [] for aid in AGENT_IDS}
-        values = {aid: [] for aid in AGENT_IDS}
+    # Pre-allocate arrays
+    obs_dim = single_obs_space.shape[0]
+    obs_right = np.zeros((num_envs, obs_dim), dtype=np.float32)
+    obs_left = np.zeros((num_envs, obs_dim), dtype=np.float32)
 
-        for _ in range(LEARN_STEP):
-            act, lp, _, val = agent.get_action(obs=obs)
+    for i, env in enumerate(envs):
+        o_r, info = env.reset()
+        obs_right[i] = o_r
+        obs_left[i] = info["otherObs"]
 
-            next_r, reward, terminated, truncated, step_info = env.step(
-                act["right"].squeeze(), act["left"].squeeze()
-            )
-            next_l = step_info["otherObs"]
-            is_done = bool(terminated or truncated)
+    scores = np.zeros(num_envs)
+    completed_scores = []
+    last_checkpoint = 0
 
-            for aid, r in zip(AGENT_IDS, [reward, -reward]):
-                states[aid].append(obs[aid])
-                actions[aid].append(act[aid].squeeze())
-                log_probs[aid].append(lp[aid].squeeze())
-                rewards[aid].append(np.array([r]))
-                dones[aid].append(done[aid])  # done from PREVIOUS step
-                values[aid].append(val[aid].squeeze())
+    print("Starting IPPO Self-Play Training...")
 
-            ep_score += reward
+    while t_agent.steps[-1] < max_steps:
+        # Initialize experience buffers
+        states = {a: [] for a in agent_ids}
+        actions = {a: [] for a in agent_ids}
+        log_probs = {a: [] for a in agent_ids}
+        entropies = {a: [] for a in agent_ids}
+        rewards = {a: [] for a in agent_ids}
+        values = {a: [] for a in agent_ids}
+        dones = {a: [] for a in agent_ids}
 
-            if is_done:
-                completed_scores.append(ep_score)
-                ep_score = 0.0
-                next_r, reset_info = env.reset()
-                next_l = reset_info["otherObs"]
+        steps_added = 0
 
-            obs = {"right": next_r, "left": next_l}
-            done = {aid: np.array([float(is_done)]) for aid in AGENT_IDS}
+        for _ in range(t_agent.learn_step):
+            # Construct IPPO dictionary observation
+            dict_obs = {
+                "slime_0": obs_left,  # Left agent
+                "slime_1": obs_right,  # Right agent
+            }
 
-        loss = agent.learn(
-            (states, actions, log_probs, rewards, dones, values, obs, done)
+            # Get actions from IPPO
+            action_tuple = agent.get_action(obs=dict_obs, training=True)
+
+            dict_actions = cast(Dict[str, np.ndarray], action_tuple[0])
+            dict_log_probs = cast(Dict[str, np.ndarray], action_tuple[1])
+            dict_entropies = cast(Dict[str, np.ndarray], action_tuple[2])
+            dict_values = cast(Dict[str, np.ndarray], action_tuple[3])
+
+            next_obs_right = np.zeros((num_envs, obs_dim), dtype=np.float32)
+            next_obs_left = np.zeros((num_envs, obs_dim), dtype=np.float32)
+            step_rewards_right = np.zeros(num_envs, dtype=np.float32)
+            step_terms = np.zeros(num_envs, dtype=bool)
+
+            # Step environments
+            for i, env in enumerate(envs):
+                # Inject left agent's action
+                env.unwrapped.otherAction = dict_actions["slime_0"][i]
+
+                # Step right agent
+                o_r, r_r, term, trunc, info = env.step(dict_actions["slime_1"][i])
+
+                step_rewards_right[i] = r_r
+                step_terms[i] = term or trunc
+                scores[i] += r_r
+
+                if term or trunc:
+                    completed_scores.append(scores[i])
+                    scores[i] = 0
+                    o_r, info = env.reset()
+
+                next_obs_right[i] = o_r
+                next_obs_left[i] = info["otherObs"]
+
+            # CRITICAL: Strict zero-sum enforcement for symmetric self-play
+            step_rewards_left = -step_rewards_right
+
+            dict_rewards = {"slime_0": step_rewards_left, "slime_1": step_rewards_right}
+            dict_dones = {"slime_0": step_terms, "slime_1": step_terms}
+
+            # Save to buffers
+            for a_id in agent_ids:
+                states[a_id].append(dict_obs[a_id])
+                actions[a_id].append(dict_actions[a_id])
+                log_probs[a_id].append(dict_log_probs[a_id])
+                entropies[a_id].append(dict_entropies[a_id])
+                values[a_id].append(dict_values[a_id])
+                rewards[a_id].append(dict_rewards[a_id])
+                dones[a_id].append(dict_dones[a_id])
+
+            obs_right = next_obs_right
+            obs_left = next_obs_left
+            steps_added += num_envs
+
+        # Structure experiences and update network
+        dict_next_obs = {"slime_0": obs_left, "slime_1": obs_right}
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            dict_next_obs,
+            dict_dones,
         )
+        t_agent.learn(experiences)
+        current_steps = t_agent.steps[-1] + steps_added
+        t_agent.steps[-1] = current_steps
 
-        total_steps += LEARN_STEP
-        pbar.update(LEARN_STEP)
-        recent = np.mean(completed_scores[-20:]) if completed_scores else float("nan")
-        mean_loss = float(
-            np.mean(
-                [v.item() if hasattr(v, "item") else float(v) for v in loss.values()]
+        # Update progress bar
+        pbar.update(steps_added)
+        if len(completed_scores) > 0:
+            # Self-play scores will naturally hover near 0.0 as they are equally matched
+            pbar.set_description(
+                f"Right Agent Avg Score: {np.mean(completed_scores[-20:]):.2f}"
             )
-        )
-        pbar.set_postfix(loss=f"{mean_loss:.4f}", score=f"{recent:+.2f}")
 
-    pbar.close()
-    env.close()
-    return agent
+        # Periodic Checkpointing
+        if current_steps - last_checkpoint >= checkpoint_freq:
+            ckpt_path = str(ckpt_dir / f"ippo_checkpoint_{current_steps}.pt")
+            agent.save_checkpoint(ckpt_path)
+            agent.save_checkpoint(save_path)  # Overwrite elite
+            last_checkpoint = current_steps
 
-
-# ── Bot vs Bot visualisation ──────────────────────────────────────────────────
-def visualise(agent: IPPO, n_episodes: int = 3) -> None:
-    print(f"\nIPPO right vs IPPO left — {n_episodes} episode(s)\n")
-    env = SlimeVolleyEnv(render_mode="human")
-
-    for ep in range(n_episodes):
-        obs_r, info = env.reset(seed=ep)
-        obs = {"right": obs_r, "left": info["otherObs"]}
-        done, score = False, 0.0
-
-        while not done:
-            act, _, _, _ = agent.get_action(obs=obs)
-            obs_r, reward, terminated, truncated, info = env.step(
-                act["right"].squeeze(), act["left"].squeeze()
-            )
-            obs = {"right": obs_r, "left": info["otherObs"]}
-            score += float(reward)
-            done = bool(terminated or truncated)
-            env.render()
-
-        print(f"  episode {ep + 1}: {score:+.0f}")
-
-    env.close()
-
-
-# ── Human vs trained bot ──────────────────────────────────────────────────────
-def play_human(agent: IPPO) -> None:
-    """Human (left slime, keyboard) vs trained IPPO (right slime).
-
-    Controls
-    --------
-    A / ← arrow  move left (away from fence)
-    D / → arrow  move right (toward fence)
-    W / ↑ arrow  jump
-    Q / Esc      quit
-    """
-    import pygame  # only needed when rendering
-
-    env = SlimeVolleyEnv(render_mode="human")
-    obs_r, info = env.reset()
-    obs = {"right": obs_r, "left": info["otherObs"]}
-    sr = sl = 0.0
-
-    print("\nHuman (left, blue)  vs  IPPO (right, yellow)")
-    print("  A/← move left   D/→ move right   W/↑ jump   Q/Esc quit\n")
-
-    try:
-        while True:
-            env.render()
-            if env._window is None:  # window was closed via ×
-                break
-
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_q] or keys[pygame.K_ESCAPE]:
-                break
-
-            # Left slime: action = [forward=toward_fence, backward, jump]
-            human = [
-                int(keys[pygame.K_d] or keys[pygame.K_RIGHT]),  # forward (right)
-                int(keys[pygame.K_a] or keys[pygame.K_LEFT]),  # backward (left)
-                int(keys[pygame.K_w] or keys[pygame.K_UP]),  # jump
-            ]
-
-            act, _, _, _ = agent.get_action(obs=obs)
-            obs_r, reward, terminated, truncated, info = env.step(
-                act["right"].squeeze(), human
-            )
-            obs = {"right": obs_r, "left": info["otherObs"]}
-            sr += float(reward)
-            sl -= float(reward)  # zero-sum
-
-            if terminated or truncated:
-                print(f"  IPPO: {sr:+.0f}   Human: {sl:+.0f}")
-                obs_r, info = env.reset()
-                obs = {"right": obs_r, "left": info["otherObs"]}
-                sr = sl = 0.0
-    finally:
+    agent.save_checkpoint(save_path)
+    for env in envs:
         env.close()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="IPPO self-play on SlimeVolley-v0",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    p.add_argument("--steps", type=int, default=10_000, help="Total training env steps")
-    p.add_argument("--vis-episodes", type=int, default=3)
-    p.add_argument(
-        "--no-vis", action="store_true", help="Skip bot-vs-bot visualisation"
-    )
-    p.add_argument(
-        "--human",
-        action="store_true",
-        help="Play against the trained bot after training",
-    )
-    args = p.parse_args()
-
-    print(f"IPPO self-play — SlimeVolley-v0   device={device}")
-    print(f"  learn_step={LEARN_STEP}   max_steps={args.steps:,}\n")
-
-    agent = train(args.steps)
-
-    if not args.no_vis:
-        visualise(agent, args.vis_episodes)
-
-    if args.human:
-        play_human(agent)
+    print("Training complete!")
 
 
 if __name__ == "__main__":
-    main()
+    train_multiagent_ippo()
