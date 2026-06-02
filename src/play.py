@@ -73,6 +73,7 @@ def main():
 
     env = gym.make(args.env, render_mode="human")
     unwrapped_env = cast(Any, env.unwrapped)
+    # unwrapped_env.t_limit = float("inf")
 
     if args.mode == "baseline_vs_human":
         policy_right = HumanPolicy()
