@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pop-size",
         type=int,
-        default=4,
+        default=2,
         help="Population size for evolution (default: 4).",
     )
     parser.add_argument(
@@ -74,22 +74,22 @@ def train_agent():
     # Define initial hyperparameters
     INIT_HP = {
         "POP_SIZE": args.pop_size,  # Population size (number of agents)
-        "BATCH_SIZE": 256,  # Mini-batch size for network updates
+        "BATCH_SIZE": 512,  # Mini-batch size for network updates
         "LR": 3e-4,  # Learning rate for the optimizer
-        "LEARN_STEP": 2048 // args.num_envs,  # Environment steps per iteration
+        "LEARN_STEP": 8192 // args.num_envs,  # Environment steps per iteration
         "GAMMA": 0.99,  # Reward discount factor
         "GAE_LAMBDA": 0.95,  # Generalized Advantage Estimation lambda
         "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
         "CLIP_COEF": 0.2,  # PPO policy clipping coefficient
-        "ENT_COEF": 0.01,  # Entropy coefficient for exploration
+        "ENT_COEF": 0.005,  # Entropy coefficient for exploration
         "VF_COEF": 0.5,  # Value function loss coefficient
         "MAX_GRAD_NORM": 0.5,  # Maximum gradient norm clipping threshold
-        "TARGET_KL": 0.015,  # Target KL divergence limit
-        "UPDATE_EPOCHS": 10,  # Optimization epochs per data batch
-        "MAX_STEPS": 12_000_000,  # Total environment steps for training
-        "EVO_STEPS": 250_000,  # Environment steps between evolutions
+        "TARGET_KL": 0.01,  # Target KL divergence limit
+        "UPDATE_EPOCHS": 4,  # Optimization epochs per data batch
+        "MAX_STEPS": 25_000_000,  # Total environment steps for training
+        "EVO_STEPS": 500_000,  # Environment steps between evolutions
         "EVAL_STEPS": None,  # Evaluation episode step limit
-        "EVAL_LOOP": 5,  # Number of evaluation episodes per agent
+        "EVAL_LOOP": 3,  # Number of evaluation episodes per agent
         "TOURN_SIZE": 2,  # Tournament selection pool size
         "ELITISM": True,  # Keep the best agent unchanged
     }
