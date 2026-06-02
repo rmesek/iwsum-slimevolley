@@ -27,13 +27,19 @@ def parse_args() -> argparse.Namespace:
         "--pop-size",
         type=int,
         default=2,
-        help="Population size for evolution (default: 4).",
+        help="Population size for evolution (default: 2).",
     )
     parser.add_argument(
         "--num-envs",
         type=int,
         default=16,
         help="Number of vectorized environments (default: 16).",
+    )
+    parser.add_argument(
+        "--evolve-from",
+        type=str,
+        default=None,
+        help="Path to an elite model (.pt) to warm-start the population.",
     )
     return parser.parse_args()
 
@@ -97,11 +103,11 @@ def train_agent():
     # Define mutation parameters
     MUT_P = {
         "NO_MUT": 1.0,  # Probability that the agent undergoes zero mutations
-        "ARCH_MUT": 0.0,  # Probability of mutating the network architecture (e.g., node count)
+        "ARCH_MUT": 0.0,  # Probability of mutating the network architecture
         "NEW_LAYER": 0.0,  # Probability of adding an entirely new hidden layer
-        "PARAMS_MUT": 0.0,  # Probability of adding noise to the network's weights and biases
+        "PARAMS_MUT": 0.0,  # Probability of adding noise to the network's weights
         "ACT_MUT": 0.0,  # Probability of changing the network's activation function
-        "RL_HP_MUT": 0.0,  # Probability of mutating the RL hyperparameters (from hp_config)
+        "RL_HP_MUT": 0.0,  # Probability of mutating the RL hyperparameters
         "MUT_SD": 0.0,  # Standard deviation of the Gaussian noise used for weight mutation
         "RAND_SEED": 1,  # Random seed for the mutation operations
     }
@@ -121,8 +127,8 @@ def train_agent():
 
     hp_config = HyperparameterConfig(
         lr=RLParameter(min=1e-5, max=1e-3),  # type: ignore
-        batch_size=RLParameter(min=64, max=512, dtype=int),  # type: ignore
-        learn_step=RLParameter(min=512, max=4096, dtype=int),  # type: ignore
+        batch_size=RLParameter(min=64, max=1024, dtype=int),  # type: ignore
+        learn_step=RLParameter(min=512, max=8192, dtype=int),  # type: ignore
         ent_coef=RLParameter(min=0.0, max=0.05),  # type: ignore
     )
 
@@ -137,6 +143,21 @@ def train_agent():
         num_envs=args.num_envs,
         device=device,
     )
+
+    # --- WARM START INJECTION ---
+    if args.evolve_from and Path(args.evolve_from).exists():
+        print(f"Warm-starting population using elite brain from: {args.evolve_from}")
+        from agilerl.algorithms.ppo import PPO
+
+        # Load the elite expert
+        elite_expert = PPO.load(args.evolve_from, device=device)
+
+        # Inject the expert's neural network weights into every agent in the new population
+        for agent in pop:
+            if isinstance(agent, PPO):
+                agent.actor.load_state_dict(elite_expert.actor.state_dict())
+                agent.critic.load_state_dict(elite_expert.critic.state_dict())
+    # ----------------------------
 
     tournament = TournamentSelection(
         tournament_size=INIT_HP["TOURN_SIZE"],
