@@ -1,5 +1,4 @@
 import argparse
-from pathlib import Path
 from typing import Any, cast
 
 import gymnasium as gym
@@ -101,7 +100,7 @@ def main():
     )
     args = parser.parse_args()
 
-    env = gym.make("SlimeVolleyShaped-v0", render_mode="human")
+    env = gym.make("SlimeVolley-v0", render_mode="human")
     unwrapped_env = cast(Any, env.unwrapped)
     elite_path = args.model
 

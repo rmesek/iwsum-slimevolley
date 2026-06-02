@@ -23,44 +23,47 @@ def train_agent():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    num_envs = 16
+    env_id = "SlimeVolley-v0"
+
     # Define the network configuration
-    NET_CONFIG = {"head_config": {"hidden_size": [64, 64]}}
+    NET_CONFIG = {"head_config": {"hidden_size": [128, 128]}}
 
     # Define initial hyperparameters mapped to the SB3 PPO1 baseline
     POP_SIZE = 4  # Change this to >1 to seamlessly enable evolution
 
     INIT_HP = {
-        "POP_SIZE": POP_SIZE,
-        "BATCH_SIZE": 512,
-        "LR": 3e-4,
-        "LEARN_STEP": 512,
-        "GAMMA": 0.99,
-        "GAE_LAMBDA": 0.95,
-        "ACTION_STD_INIT": 0.6,
-        "CLIP_COEF": 0.2,
-        "ENT_COEF": 0.0,
-        "VF_COEF": 0.5,
-        "MAX_GRAD_NORM": 0.5,
-        "TARGET_KL": None,
-        "UPDATE_EPOCHS": 10,
-        "MAX_STEPS": 12_000_000,
-        "EVO_STEPS": 10_000,
-        "EVAL_STEPS": None,
-        "EVAL_LOOP": 5,
-        "TOURN_SIZE": 2,
-        "ELITISM": True,
+        "POP_SIZE": POP_SIZE,  # Population size (number of agents)
+        "BATCH_SIZE": 256,  # Mini-batch size for network updates
+        "LR": 3e-4,  # Learning rate for the optimizer
+        "LEARN_STEP": 2048 // num_envs,  # Environment steps collected per iteration
+        "GAMMA": 0.99,  # Reward discount factor
+        "GAE_LAMBDA": 0.95,  # Generalized Advantage Estimation lambda
+        "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+        "CLIP_COEF": 0.2,  # PPO policy clipping coefficient
+        "ENT_COEF": 0.01,  # Entropy coefficient for exploration
+        "VF_COEF": 0.5,  # Value function loss coefficient
+        "MAX_GRAD_NORM": 0.5,  # Maximum gradient norm clipping threshold
+        "TARGET_KL": 0.015,  # Target KL divergence limit
+        "UPDATE_EPOCHS": 10,  # Optimization epochs per data batch
+        "MAX_STEPS": 12_000_000,  # Total environment steps for training
+        "EVO_STEPS": 10_000,  # Environment steps between evolutions
+        "EVAL_STEPS": None,  # Evaluation episode step limit
+        "EVAL_LOOP": 5,  # Number of evaluation episodes per agent
+        "TOURN_SIZE": 2,  # Tournament selection pool size
+        "ELITISM": True,  # Keep the best agent unchanged
     }
 
     # Define mutation parameters
     MUT_P = {
-        "NO_MUT": 1.0,
-        "ARCH_MUT": 0.0,
-        "NEW_LAYER": 0.0,
-        "PARAMS_MUT": 0.0,
-        "ACT_MUT": 0.0,
-        "RL_HP_MUT": 0.0,
-        "MUT_SD": 0.0,
-        "RAND_SEED": 1,
+        "NO_MUT": 1.0,  # Probability that the agent undergoes zero mutations
+        "ARCH_MUT": 0.0,  # Probability of mutating the network architecture (e.g., node count)
+        "NEW_LAYER": 0.0,  # Probability of adding an entirely new hidden layer
+        "PARAMS_MUT": 0.0,  # Probability of adding noise to the network's weights and biases
+        "ACT_MUT": 0.0,  # Probability of changing the network's activation function
+        "RL_HP_MUT": 0.0,  # Probability of mutating the RL hyperparameters (from hp_config)
+        "MUT_SD": 0.0,  # Standard deviation of the Gaussian noise used for weight mutation
+        "RAND_SEED": 1,  # Random seed for the mutation operations
     }
 
     if INIT_HP["POP_SIZE"] > 1:
@@ -73,18 +76,16 @@ def train_agent():
         MUT_P["MUT_SD"] = 0.1
 
     # Create the Environment
-    num_envs = 8
-    env_id = "SlimeVolley-v0"
-
     env = make_vect_envs(env_id, num_envs=num_envs)
     observation_space = env.single_observation_space
     action_space = env.single_action_space
 
     # Define hyperparameter search spaces for mutations
     hp_config = HyperparameterConfig(
-        lr=RLParameter(min=1e-4, max=1e-3),  # type: ignore
-        batch_size=RLParameter(min=64, max=512),  # type: ignore
-        learn_step=RLParameter(min=256, max=1024),  # type: ignore
+        lr=RLParameter(min=1e-5, max=1e-3),  # type: ignore
+        batch_size=RLParameter(min=64, max=512, dtype=int),  # type: ignore
+        learn_step=RLParameter(min=512, max=4096, dtype=int),  # type: ignore
+        ent_coef=RLParameter(min=0.0, max=0.05),  # type: ignore
     )
 
     # Create a Population of Agents
