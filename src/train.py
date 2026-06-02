@@ -1,5 +1,5 @@
 # https://docs.agilerl.com/en/latest/on_policy/index.html
-
+import argparse
 from pathlib import Path
 
 import torch
@@ -9,34 +9,74 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import create_population, make_vect_envs
 
+# Register environments
+import shaped_slimevolleygym  # noqa: F401
 import slimevolleygym  # noqa: F401
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train AgileRL PPO on SlimeVolley")
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=["sparse", "shaped"],
+        default="sparse",
+        help="Reward shaping configuration to use (default: sparse).",
+    )
+    parser.add_argument(
+        "--pop-size",
+        type=int,
+        default=4,
+        help="Population size for evolution (default: 4).",
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=16,
+        help="Number of vectorized environments (default: 16).",
+    )
+    return parser.parse_args()
+
+
 def train_agent():
+    args = parse_args()
+
+    # Configuration mapped by reward mode for easy future extension
+    REWARD_MODES = {
+        "sparse": {
+            "env_id": "SlimeVolley-v0",
+            "save_name": "ppo_slimevolley_elite.pt",
+            "ckpt_name": "ppo_slimevolley",
+        },
+        "shaped": {
+            "env_id": "SlimeVolleyShaped-v0",
+            "save_name": "ppo_slimevolley_shaped_elite.pt",
+            "ckpt_name": "ppo_slimevolley_shaped",
+        },
+    }
+
+    mode_cfg = REWARD_MODES[args.reward_mode]
+    env_id = mode_cfg["env_id"]
+
     # Set up paths
     base_dir = Path(__file__).parent.parent
     ckpt_dir = base_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
 
-    save_path = str(ckpt_dir / "ppo_slimevolley_elite.pt")
-    checkpoint_base_path = str(ckpt_dir / "ppo_slimevolley")
+    save_path = str(ckpt_dir / mode_cfg["save_name"])
+    checkpoint_base_path = str(ckpt_dir / mode_cfg["ckpt_name"])
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    num_envs = 16
-    env_id = "SlimeVolley-v0"
 
     # Define the network configuration
     NET_CONFIG = {"head_config": {"hidden_size": [64, 64]}}
 
-    # Define initial hyperparameters mapped to the SB3 PPO1 baseline
-    POP_SIZE = 4  # Change this to >1 to seamlessly enable evolution
-
+    # Define initial hyperparameters
     INIT_HP = {
-        "POP_SIZE": POP_SIZE,  # Population size (number of agents)
+        "POP_SIZE": args.pop_size,  # Population size (number of agents)
         "BATCH_SIZE": 256,  # Mini-batch size for network updates
         "LR": 3e-4,  # Learning rate for the optimizer
-        "LEARN_STEP": 2048 // num_envs,  # Environment steps collected per iteration
+        "LEARN_STEP": 2048 // args.num_envs,  # Environment steps per iteration
         "GAMMA": 0.99,  # Reward discount factor
         "GAE_LAMBDA": 0.95,  # Generalized Advantage Estimation lambda
         "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
@@ -67,20 +107,18 @@ def train_agent():
     }
 
     if INIT_HP["POP_SIZE"] > 1:
-        MUT_P["NO_MUT"] = 0.5
-        MUT_P["ARCH_MUT"] = 0.1
-        MUT_P["NEW_LAYER"] = 0.1
-        MUT_P["PARAMS_MUT"] = 0.0
-        MUT_P["ACT_MUT"] = 0.0
-        MUT_P["RL_HP_MUT"] = 0.3
-        MUT_P["MUT_SD"] = 0.1
+        MUT_P.update(
+            {
+                "NO_MUT": 0.5,
+                "ARCH_MUT": 0.1,
+                "NEW_LAYER": 0.1,
+                "RL_HP_MUT": 0.3,
+                "MUT_SD": 0.1,
+            }
+        )
 
-    # Create the Environment
-    env = make_vect_envs(env_id, num_envs=num_envs)
-    observation_space = env.single_observation_space
-    action_space = env.single_action_space
+    env = make_vect_envs(env_id, num_envs=args.num_envs)
 
-    # Define hyperparameter search spaces for mutations
     hp_config = HyperparameterConfig(
         lr=RLParameter(min=1e-5, max=1e-3),  # type: ignore
         batch_size=RLParameter(min=64, max=512, dtype=int),  # type: ignore
@@ -88,20 +126,18 @@ def train_agent():
         ent_coef=RLParameter(min=0.0, max=0.05),  # type: ignore
     )
 
-    # Create a Population of Agents
     pop = create_population(
         algo="PPO",
-        observation_space=observation_space,
-        action_space=action_space,
+        observation_space=env.single_observation_space,
+        action_space=env.single_action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         hp_config=hp_config,
         population_size=INIT_HP["POP_SIZE"],
-        num_envs=num_envs,
+        num_envs=args.num_envs,
         device=device,
     )
 
-    # Create Tournament and Mutation Objects
     tournament = TournamentSelection(
         tournament_size=INIT_HP["TOURN_SIZE"],
         elitism=INIT_HP["ELITISM"],
@@ -121,10 +157,9 @@ def train_agent():
         device=device,
     )
 
-    print(f"Starting AgileRL Training on {env_id}...")
+    print(f"Starting AgileRL Training on {env_id} using {args.reward_mode} rewards...")
 
-    # Training and Saving an Agent
-    trained_pop, pop_fitnesses = train_on_policy(
+    train_on_policy(
         env=env,
         env_name=env_id,
         algo="PPO",
@@ -136,7 +171,6 @@ def train_agent():
         tournament=tournament,
         mutation=mutations,
         wb=False,
-        # Built-in checkpointing args:
         checkpoint=100_000,
         checkpoint_path=checkpoint_base_path,
         save_elite=True,

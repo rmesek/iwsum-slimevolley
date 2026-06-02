@@ -1,3 +1,6 @@
+from typing import Any
+
+import numpy as np
 from gymnasium.envs.registration import register
 
 from slimevolleygym.slimevolley import SlimeVolleyEnv
@@ -6,118 +9,98 @@ from slimevolleygym.slimevolley import SlimeVolleyEnv
 class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
     """
     Custom wrapper class that inherits from SlimeVolleyEnv.
-    Fails the episode and penalizes an agent if it juggles/touches
+    Fails the rally and penalizes an agent if it juggles/touches
     the ball more than 3 times without it crossing the net.
     Now includes dense reward shaping (survival + returning over the net).
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.max_touches = 3
-        self.right_touches = 0
-        self.left_touches = 0
-        self.was_moving_down = False
+        self.max_touches: int = 3
+        self._reset_touch_state()
 
-        # Added a cooldown to prevent "ghost touches" from physics jitter
-        self.touch_cooldown = 0
+    def _reset_touch_state(self) -> None:
+        """Helper to cleanly reset internal tracking states."""
+        self.right_touches: int = 0
+        self.left_touches: int = 0
+        self.was_moving_down: bool = False
+        self.touch_cooldown: int = 0
+        self.prev_bx: float = 0.0
 
-        # Track the ball's previous X position to detect when it crosses the net
-        self.prev_bx = 0
-
-    def reset(self, **kwargs):
-        self.right_touches = 0
-        self.left_touches = 0
-        self.was_moving_down = False
-        self.touch_cooldown = 0
-        self.prev_bx = 0
+    def reset(self, **kwargs) -> tuple[np.ndarray, dict[str, Any]]:
+        self._reset_touch_state()
         return super().reset(**kwargs)
 
-    def step(self, action, otherAction=None):
-        # Capture the raw environment response
+    def step(
+        self, action: np.ndarray, otherAction: Any = None
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+
         obs, base_reward, terminated, truncated, info = super().step(
             action, otherAction
         )
 
-        # Initialize our shaped reward with the base reward
-        reward = base_reward
+        reward = float(base_reward)
 
-        # Observation features mapping: 0:x, 1:y, 2:vx, 3:vy, 4:bx, 5:by, 6:bvx, 7:bvy
         bx = obs[4]
         bvy = obs[7]
 
-        # Tick down the physics jitter cooldown
         if self.touch_cooldown > 0:
             self.touch_cooldown -= 1
 
-        # If a normal point was just scored (base_reward != 0), reset touch counters for the new serve
-        # We use base_reward here so our shaped rewards don't trigger a false reset!
+        # End of rally - skip shaping and reset states for the serve
         if base_reward != 0:
-            self.right_touches = 0
-            self.left_touches = 0
-            self.was_moving_down = False
-            self.touch_cooldown = 0
-            # Return immediately without applying shaping, as the rally just ended
+            self._reset_touch_state()
             return obs, reward, terminated, truncated, info
 
         # --- DENSE REWARD SHAPING ---
+        reward += 0.01  # Survival bonus
 
-        # 1. SURVIVAL BONUS: Reward the agent slightly for every frame it keeps the ball in play
-        reward += 0.01
+        # Net cross reward
+        if self.prev_bx > 0 > bx:
+            reward += 0.5
 
-        # 2. OVER THE NET REWARD: If the ball was on our side (>0), and is now on the opponent's side (<0)
-        if self.prev_bx > 0 and bx < 0:
-            reward += 0.5  # Significant reward for a successful return
+        self.prev_bx = bx
 
-        self.prev_bx = bx  # Update previous position for the next frame
-
-        # ----------------------------
-
+        # --- TOUCH TRACKING & RULES ---
         is_moving_down = bvy < 0
 
-        # Reset the opponent's touch count when the ball crosses the net
+        # Reset opponent touches when ball changes sides
         if bx > 0:
             self.left_touches = 0
         elif bx < 0:
             self.right_touches = 0
 
-        # Detect a bounce/touch (ball was moving down, now moving up/flat)
-        # Added cooldown check to prevent rapid frame-by-frame ghost touches
+        # Bounce / Touch detection via velocity shift
         if self.was_moving_down and not is_moving_down and self.touch_cooldown == 0:
-            self.touch_cooldown = 5  # Wait 5 frames before registering another touch
+            self.touch_cooldown = 5
 
             if bx > 0:
                 self.right_touches += 1
-                # 3. FIRST TOUCH REWARD: Only reward the FIRST touch to prevent juggling point-farming
                 if self.right_touches == 1:
-                    reward += 0.1
+                    reward += 0.1  # First touch reward
             elif bx < 0:
                 self.left_touches += 1
 
         self.was_moving_down = is_moving_down
 
-        # Enforce the 3-touch rule for the right agent (your model)
+        # Enforce 3-touch rule for Right Agent
         if self.right_touches > self.max_touches:
-            reward = -1.0  # Penalize the agent heavily
+            reward = -1.0
             self.right_touches = 0
             self.left_touches = 0
-
-            # Manually deduct a life and reset the rally instead of killing the episode
             self.game.agent_right.life -= 1
             self.game.agent_left.emotion = "happy"
             self.game.agent_right.emotion = "sad"
             self.game.newMatch()
 
-            # Only terminate if the agent has actually run out of lives
             if self.game.agent_right.life <= 0:
                 terminated = True
 
-        # Enforce the 3-touch rule for the left agent (baseline opponent)
+        # Enforce 3-touch rule for Left Agent
         elif self.left_touches > self.max_touches:
-            reward = 1.0  # Your model gets a point
+            reward = 1.0
             self.right_touches = 0
             self.left_touches = 0
-
-            # Deduct life from the opponent and reset rally
             self.game.agent_left.life -= 1
             self.game.agent_left.emotion = "sad"
             self.game.agent_right.emotion = "happy"

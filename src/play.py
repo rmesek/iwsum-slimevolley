@@ -1,10 +1,8 @@
-# uv run src/play.py --mode baseline_vs_elite --model checkpoints/ppo_slimevolley_elite.pt
-# uv run src/play.py --mode baseline_vs_elite --model checkpoints/ppo_slimevolley_shaped_elite.pt --env SlimeVolleyShaped-v0
-
 import argparse
 from typing import Any, cast
 
 import gymnasium as gym
+import numpy as np
 import pygame
 
 import shaped_slimevolleygym  # noqa: F401
@@ -12,8 +10,7 @@ import slimevolleygym  # noqa: F401
 
 
 class HumanPolicy:
-    def predict(self, obs):
-        pygame.event.pump()
+    def predict(self, obs: np.ndarray) -> list[int]:
         keys = pygame.key.get_pressed()
         return [
             int(keys[pygame.K_LEFT]),
@@ -23,15 +20,14 @@ class HumanPolicy:
 
 
 class AgileRLPolicy:
-    def __init__(self, path):
+    def __init__(self, path: str):
         import torch
         from agilerl.algorithms.ppo import PPO
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = PPO.load(path, device=self.device)
 
-    def predict(self, obs):
-        import numpy as np
+    def predict(self, obs: np.ndarray) -> np.ndarray:
         import torch
 
         if len(obs.shape) == 1:
@@ -48,16 +44,12 @@ class AgileRLPolicy:
 def main():
     pygame.init()
     pygame.display.set_mode((1200, 500))
-    pygame.display.set_caption("Slime Volleyball")
+    pygame.display.set_caption("Slime Volleyball Player")
 
-    parser = argparse.ArgumentParser(description="Slime Volleyball Player")
+    parser = argparse.ArgumentParser(description="Slime Volleyball Match Viewer")
     parser.add_argument(
         "--mode",
-        choices=[
-            "baseline_vs_human",
-            "elite_vs_human",
-            "baseline_vs_elite",
-        ],
+        choices=["baseline_vs_human", "elite_vs_human", "baseline_vs_elite"],
         required=True,
     )
     parser.add_argument(
@@ -70,26 +62,26 @@ def main():
         "--env",
         type=str,
         default="SlimeVolley-v0",
-        help="The Gym environment ID to play in",
+        help="The Gym environment ID to play in.",
     )
     args = parser.parse_args()
 
-    # --- NEW: Use the args.env variable instead of the hardcoded string ---
+    # UX Improvement: Auto-switch environment if loading a shaped model
+    if "shaped" in args.model.lower() and args.env == "SlimeVolley-v0":
+        print("Auto-detecting shaped environment based on model name...")
+        args.env = "SlimeVolleyShaped-v0"
+
     env = gym.make(args.env, render_mode="human")
     unwrapped_env = cast(Any, env.unwrapped)
-    elite_path = args.model
-
-    policy_right: Any = None
-    policy_left: Any = None
 
     if args.mode == "baseline_vs_human":
         policy_right = HumanPolicy()
         policy_left = unwrapped_env.policy
     elif args.mode == "elite_vs_human":
         policy_right = HumanPolicy()
-        policy_left = AgileRLPolicy(elite_path)
+        policy_left = AgileRLPolicy(args.model)
     else:
-        policy_right = AgileRLPolicy(elite_path)
+        policy_right = AgileRLPolicy(args.model)
         policy_left = unwrapped_env.policy
 
     obs, info = env.reset()
@@ -97,6 +89,14 @@ def main():
 
     done = False
     while not done:
+        # Proper OS-level event loop handling avoids hanging/freezing windows
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                done = True
+
+        if done:
+            break
+
         action_right = policy_right.predict(obs)
         action_left = policy_left.predict(info["otherObs"])
 
@@ -105,6 +105,8 @@ def main():
         done = terminated or truncated
 
         env.render()
+
+        # Original fallback condition if Pygame window is directly destroyed
         if unwrapped_env._window is None:
             break
 
