@@ -27,11 +27,11 @@ def train_agent():
     NET_CONFIG = {"head_config": {"hidden_size": [64, 64]}}
 
     # Define initial hyperparameters mapped to the SB3 PPO1 baseline
-    POP_SIZE = 1  # Change this to >1 to seamlessly enable evolution
+    POP_SIZE = 4  # Change this to >1 to seamlessly enable evolution
 
     INIT_HP = {
         "POP_SIZE": POP_SIZE,
-        "BATCH_SIZE": 64,
+        "BATCH_SIZE": 512,
         "LR": 3e-4,
         "LEARN_STEP": 512,
         "GAMMA": 0.99,
@@ -43,7 +43,7 @@ def train_agent():
         "MAX_GRAD_NORM": 0.5,
         "TARGET_KL": None,
         "UPDATE_EPOCHS": 10,
-        "MAX_STEPS": 3_000_000,
+        "MAX_STEPS": 12_000_000,
         "EVO_STEPS": 10_000,
         "EVAL_STEPS": None,
         "EVAL_LOOP": 5,
