@@ -23,9 +23,11 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         """Helper to cleanly reset internal tracking states."""
         self.right_touches: int = 0
         self.left_touches: int = 0
-        self.was_moving_down: bool = False
-        self.touch_cooldown: int = 0
         self.prev_bx: float = 0.0
+
+        # State transition flags for spatial collisions
+        self.was_touching_right: bool = False
+        self.was_touching_left: bool = False
 
     def reset(self, **kwargs) -> tuple[np.ndarray, dict[str, Any]]:
         self._reset_touch_state()
@@ -41,13 +43,9 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
         reward = float(base_reward)
 
-        # 4: ball_x, 6: ball_vx, 7: ball_vy
+        # 4: ball_x, 6: ball_vx
         bx = obs[4]
         bvx = obs[6]
-        bvy = obs[7]
-
-        if self.touch_cooldown > 0:
-            self.touch_cooldown -= 1
 
         # End of rally - skip shaping and reset states for the serve
         if base_reward != 0:
@@ -66,7 +64,6 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         self.prev_bx = bx
 
         # --- TOUCH TRACKING & RULES ---
-        is_moving_down = bvy < 0
 
         # Reset touches when ball changes sides
         if bx > 0:
@@ -74,16 +71,34 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         elif bx < 0:
             self.right_touches = 0
 
-        # Bounce / Touch detection via velocity shift
-        if self.was_moving_down and not is_moving_down and self.touch_cooldown == 0:
-            self.touch_cooldown = 5
+        # Bounce / Touch detection via buffered spatial collision
+        ball = self.game.ball
+        p_right = self.game.agent_right
+        p_left = self.game.agent_left
 
-            if bx > 0:
-                self.right_touches += 1
-            elif bx < 0:
-                self.left_touches += 1
+        # Calculate squared distances
+        dist_sq_right = (ball.x - p_right.x) ** 2 + (ball.y - p_right.y) ** 2
+        dist_sq_left = (ball.x - p_left.x) ** 2 + (ball.y - p_left.y) ** 2
 
-        self.was_moving_down = is_moving_down
+        # The Physics Buffer:
+        BUFFER = ball.r * 0.25
+        col_dist_sq_right = (p_right.r + ball.r + BUFFER) ** 2
+        col_dist_sq_left = (p_left.r + ball.r + BUFFER) ** 2
+
+        # Check current physical overlap (within the buffer zone)
+        is_touching_right = dist_sq_right <= col_dist_sq_right
+        is_touching_left = dist_sq_left <= col_dist_sq_left
+
+        # Only count if touching NOW, but was NOT touching last frame
+        if is_touching_right and not self.was_touching_right:
+            self.right_touches += 1
+
+        if is_touching_left and not self.was_touching_left:
+            self.left_touches += 1
+
+        # Save the overlap state for the next frame
+        self.was_touching_right = is_touching_right
+        self.was_touching_left = is_touching_left
 
         # Enforce 3-touch rule for Right Agent
         if self.right_touches > self.max_touches:
