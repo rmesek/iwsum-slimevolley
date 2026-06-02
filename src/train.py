@@ -14,7 +14,7 @@ import slimevolleygym  # noqa: F401
 
 def train_agent():
     # Set up paths
-    base_dir = Path(__file__).parent
+    base_dir = Path(__file__).parent.parent
     ckpt_dir = base_dir / "checkpoints"
     ckpt_dir.mkdir(exist_ok=True)
 
@@ -27,7 +27,7 @@ def train_agent():
     env_id = "SlimeVolley-v0"
 
     # Define the network configuration
-    NET_CONFIG = {"head_config": {"hidden_size": [128, 128]}}
+    NET_CONFIG = {"head_config": {"hidden_size": [64, 64]}}
 
     # Define initial hyperparameters mapped to the SB3 PPO1 baseline
     POP_SIZE = 4  # Change this to >1 to seamlessly enable evolution
@@ -47,7 +47,7 @@ def train_agent():
         "TARGET_KL": 0.015,  # Target KL divergence limit
         "UPDATE_EPOCHS": 10,  # Optimization epochs per data batch
         "MAX_STEPS": 12_000_000,  # Total environment steps for training
-        "EVO_STEPS": 10_000,  # Environment steps between evolutions
+        "EVO_STEPS": 250_000,  # Environment steps between evolutions
         "EVAL_STEPS": None,  # Evaluation episode step limit
         "EVAL_LOOP": 5,  # Number of evaluation episodes per agent
         "TOURN_SIZE": 2,  # Tournament selection pool size
@@ -67,12 +67,12 @@ def train_agent():
     }
 
     if INIT_HP["POP_SIZE"] > 1:
-        MUT_P["NO_MUT"] = 0.4
-        MUT_P["ARCH_MUT"] = 0.2
-        MUT_P["NEW_LAYER"] = 0.2
-        MUT_P["PARAMS_MUT"] = 0.2
+        MUT_P["NO_MUT"] = 0.5
+        MUT_P["ARCH_MUT"] = 0.1
+        MUT_P["NEW_LAYER"] = 0.1
+        MUT_P["PARAMS_MUT"] = 0.0
         MUT_P["ACT_MUT"] = 0.0
-        MUT_P["RL_HP_MUT"] = 0.2
+        MUT_P["RL_HP_MUT"] = 0.3
         MUT_P["MUT_SD"] = 0.1
 
     # Create the Environment
