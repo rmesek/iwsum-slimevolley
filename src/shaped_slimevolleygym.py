@@ -11,7 +11,7 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
     Custom wrapper class that inherits from SlimeVolleyEnv.
     Fails the rally and penalizes an agent if it juggles/touches
     the ball more than 3 times without it crossing the net.
-    Includes dense reward shaping (potential-based distance + returning over the net).
+    Strict milestone shaping: Rewards for point win/loss and fast net crossings.
     """
 
     def __init__(self, **kwargs):
@@ -26,7 +26,6 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
         self.was_moving_down: bool = False
         self.touch_cooldown: int = 0
         self.prev_bx: float = 0.0
-        self.prev_dist: float | None = None  # Tracks distance to ball for shaping
 
     def reset(self, **kwargs) -> tuple[np.ndarray, dict[str, Any]]:
         self._reset_touch_state()
@@ -42,9 +41,9 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
         reward = float(base_reward)
 
-        # 0: agent_x, 4: ball_x, 7: ball_vy
-        agent_x = obs[0]
+        # 4: ball_x, 6: ball_vx, 7: ball_vy
         bx = obs[4]
+        bvx = obs[6]
         bvy = obs[7]
 
         if self.touch_cooldown > 0:
@@ -55,28 +54,21 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
             self._reset_touch_state()
             return obs, reward, terminated, truncated, info
 
-        # --- DENSE REWARD SHAPING ---
-
-        # Potential-Based Distance Tracking
-        current_dist = abs(agent_x - bx)
-
-        if self.prev_dist is not None:
-            # If we moved closer, delta is positive (Reward). If further, negative (Penalty).
-            delta_dist = self.prev_dist - current_dist
-            reward += delta_dist * 0.2
-
-        self.prev_dist = current_dist
+        # --- MILESTONE REWARD SHAPING ---
 
         # Net cross reward
-        if self.prev_bx > 0 > bx:
-            reward += 0.5
+        if (self.prev_bx > 0 > bx) or (self.prev_bx < 0 < bx):
+            base_cross_reward = 0.01
+            # This rewards aggressive drives and spikes.
+            velocity_bonus = abs(bvx) * 0.0
+            reward += base_cross_reward + velocity_bonus
 
         self.prev_bx = bx
 
         # --- TOUCH TRACKING & RULES ---
         is_moving_down = bvy < 0
 
-        # Reset opponent touches when ball changes sides
+        # Reset touches when ball changes sides
         if bx > 0:
             self.left_touches = 0
         elif bx < 0:
@@ -88,8 +80,6 @@ class ShapedSlimeVolleyEnv(SlimeVolleyEnv):
 
             if bx > 0:
                 self.right_touches += 1
-                if self.right_touches == 1:
-                    reward += 0.1  # First touch reward
             elif bx < 0:
                 self.left_touches += 1
 
