@@ -233,3 +233,8 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,windows
+
+!docs/slimevolley-sprawozdanie/build/
+!docs/slimevolley-sprawozdanie/build/slimevolley-sprawozdanie/
+docs/slimevolley-sprawozdanie/build/slimevolley-sprawozdanie/*
+!docs/slimevolley-sprawozdanie/build/slimevolley-sprawozdanie/slimevolley-sprawozdanie.pdf
