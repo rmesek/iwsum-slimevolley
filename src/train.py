@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         "--pop-size",
         type=int,
         default=6,
-        help="Population size for evolution (default: 2).",
+        help="Population size for evolution (default: 6).",
     )
     parser.add_argument(
         "--num-envs",
